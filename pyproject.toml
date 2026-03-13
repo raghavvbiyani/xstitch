@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xstitch"
+version = "0.3.0"
+description = "Stitch — cross-tool memory for AI agents. Never re-explain your work."
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = []
+authors = [{name = "Raghav Biyani", email = "raghavvbiyani@gmail.com"}]
+keywords = [
+    "ai-agent", "context", "memory", "handoff", "mcp",
+    "cursor", "claude-code", "codex", "gemini", "windsurf",
+    "ai-tools", "developer-tools", "cross-tool", "session-memory",
+    "agent-context", "llm", "coding-assistant"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Version Control",
+]
+
+[project.urls]
+Repository = "https://github.com/raghavvbiyani/xstitch"
+Homepage = "https://github.com/raghavvbiyani/xstitch"
+Documentation = "https://github.com/raghavvbiyani/xstitch/tree/main/docs"
+"Bug Tracker" = "https://github.com/raghavvbiyani/xstitch/issues"
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0.0"]
+search = ["sentence-transformers>=2.0.0", "numpy>=1.20.0"]
+all = ["mcp>=1.0.0", "sentence-transformers>=2.0.0", "numpy>=1.20.0"]
+
+[project.scripts]
+stitch = "xstitch.cli:main"
+
+[project.entry-points."xstitch.integrations"]
+cursor = "xstitch.integrations.tools.cursor:JsonMcpTool"
+claude_code = "xstitch.integrations.tools.claude_code:ClaudeCodeTool"
+codex = "xstitch.integrations.tools.codex:CodexTool"
+windsurf = "xstitch.integrations.tools.windsurf:JsonMcpTool"
+gemini = "xstitch.integrations.tools.gemini:JsonMcpTool"
+copilot = "xstitch.integrations.tools.copilot:JsonMcpTool"
+zed = "xstitch.integrations.tools.zed:JsonMcpTool"
+continue_dev = "xstitch.integrations.tools.continue_dev:ContinueTool"
+aider = "xstitch.integrations.tools.aider:AiderTool"
+
+[tool.setuptools.packages.find]
+include = ["xstitch*"]
