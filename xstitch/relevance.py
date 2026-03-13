@@ -476,14 +476,56 @@ class BM25RelevanceEngine:
 
                 all_query_terms = set(query_tokens + query_bigrams)
 
+                raw_fraction = len(matched_terms) / max(len(all_query_terms), 1)
+
+                # IDF-weighted coverage: rare term matches count for more
+                # than common ones. A single match on "eucatur" (unique,
+                # high-IDF) is stronger evidence than matching 3 generic terms.
+                matched_idf = 0.0
+                for t in matched_terms:
+                    n = self.doc_freq.get(t, 0)
+                    matched_idf += max(
+                        math.log((self.n_docs - n + 0.5) / (n + 0.5) + 1.0),
+                        0.1,
+                    )
+
+                denom_idf = 0.0
+                for t in all_query_terms:
+                    n = self.doc_freq.get(t, 0)
+                    if n > 0:
+                        denom_idf += max(
+                            math.log(
+                                (self.n_docs - n + 0.5) / (n + 0.5) + 1.0
+                            ),
+                            0.1,
+                        )
+                    else:
+                        # Term absent from corpus — minimal penalty
+                        # (query noise, not negative evidence)
+                        denom_idf += 0.2
+
+                idf_fraction = (
+                    min(matched_idf / max(denom_idf, 0.01), 1.0)
+                    if denom_idf > 0
+                    else raw_fraction
+                )
+
+                effective_fraction = max(raw_fraction, idf_fraction)
+
+                # Floor: matching in coarse fields (title/objective/tags) is
+                # strong intent evidence — a single specific term in the title
+                # is enough to identify the task, even if the query has many
+                # extra terms the task never mentioned.
+                if coarse_matched:
+                    effective_fraction = max(effective_fraction, 0.5)
+
                 results.append({
                     "task": doc.task,
                     "score": total_score,
                     "confidence": 0.0,
                     "evidence": evidence[:10],
                     "field_scores": field_scores,
-                    "_matched_fraction": len(matched_terms)
-                    / max(len(all_query_terms), 1),
+                    "_matched_fraction": effective_fraction,
                 })
 
         if not results:

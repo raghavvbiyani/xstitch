@@ -745,15 +745,26 @@ def _build_hook_messages(result: dict, full_response: str) -> tuple[str, str]:
             f"[Stitch] Active task: '{task.title}' (not loaded — prompt doesn't appear related).",
             f"Stitch CONTEXT: There is an active task '{task.title}' ({task.id}) but the user's prompt "
             f"doesn't appear related to it. Do NOT load or resume it unless the user explicitly asks. "
-            f"If the user wants to resume, they can say 'resume' or 'continue the task'.",
+            f"If the user wants to resume, they can say 'resume' or 'continue the task'.\n"
+            f"You MUST push snapshots (stitch_snapshot) after completing sub-tasks and decisions (stitch_add_decision) for architectural choices.\n"
+            f"Push every 2-3 minutes of active work.",
+        )
+    elif action == "show_matches":
+        matches = result.get("matches", [])
+        titles = ", ".join(f"'{m['task'].title}'" for m in matches[:3])
+        return (
+            f"[Stitch] Found {len(matches)} possible matching tasks: {titles}.",
+            f"Stitch CONTEXT: Multiple tasks may match this prompt. Ask the user which to resume.\n"
+            f"Push snapshots and decisions per the Stitch protocol.\n\n"
+            f"{full_response}",
         )
     elif action == "greeting":
         return ("", "")
     else:
         return (
             "[Stitch] No prior context found. Starting fresh.",
-            "Stitch CONTEXT: No matching task found. Create a new task with stitch_snapshot if this is meaningful work.\n"
-            "Push snapshots and decisions per the Stitch protocol.",
+            "Stitch CONTEXT: No matching task found. If this is meaningful work, create a new task "
+            "with stitch_snapshot and push snapshots/decisions per the Stitch protocol.",
         )
 
 

@@ -250,35 +250,36 @@ def auto_route(user_prompt: str, store: Store) -> dict:
 
     elif intent == "new":
         title = _extract_task_title(user_prompt)
-        task = store.create_task(title=title, objective=user_prompt[:500])
+        tags = _extract_intent_tags(user_prompt)
+        objective = _build_enriched_objective(user_prompt)
+        task = store.create_task(title=title, objective=objective, tags=tags)
         result["action"] = "created"
         result["task"] = task
 
     else:  # ambiguous — relevance is the ONLY gate
         matches = smart_match(user_prompt, store)
         if matches and matches[0]["confidence"] >= 0.4:
-            # Strong relevance match found — load that task's context
             result = _handle_resume(user_prompt, store, result)
-        else:
-            # No relevance match. Mention active task if one exists,
-            # but do NOT load its full briefing.
+        elif _is_conversational(user_prompt):
+            # Greeting/filler — don't create a task for "hi claude"
             active_id = store.get_active_task_id()
             if active_id:
                 task = store.get_task(active_id)
                 if task:
                     result["action"] = "active_task_exists"
                     result["task"] = task
-                    return result
-
-            # No active task, no match. Only create a new task if
-            # the prompt has enough substance to be actionable work.
-            if _is_conversational(user_prompt):
+            if result["action"] is None:
                 result["action"] = "greeting"
-            else:
-                title = _extract_task_title(user_prompt)
-                task = store.create_task(title=title, objective=user_prompt[:500])
-                result["action"] = "created"
-                result["task"] = task
+        else:
+            # Actionable prompt with no relevance match.
+            # ALWAYS create a new task so the session's work gets tracked,
+            # regardless of whether a stale active task exists.
+            title = _extract_task_title(user_prompt)
+            tags = _extract_intent_tags(user_prompt)
+            objective = _build_enriched_objective(user_prompt)
+            task = store.create_task(title=title, objective=objective, tags=tags)
+            result["action"] = "created"
+            result["task"] = task
 
     return result
 
@@ -446,14 +447,155 @@ def format_auto_route_response(result: dict) -> str:
 
 # --- Helpers ---
 
+# ── Linguistic Preamble Scanner ──────────────────────────────────────
+#
+# English closed-class (function) words organized by grammatical role.
+# These carry grammatical structure but not task-specific content.
+# The scanner strips any continuous left-to-right sequence of these from
+# the start of a prompt, stopping at the first open-class (content) word.
+#
+# This is COMPOSITIONAL: "I would really like you to please help me to"
+# is fully stripped because every word is a function word — no matter
+# what combination or order they appear in. Unlike hardcoded prefix
+# matching, this handles arbitrary preamble without maintenance.
+
+_CONTRACTIONS: dict[str, str] = {
+    # Pronoun contractions
+    "i'm": "i am", "i'd": "i would", "i'll": "i will", "i've": "i have",
+    "we're": "we are", "we'd": "we would", "we'll": "we will", "we've": "we have",
+    "you're": "you are", "you'd": "you would", "you'll": "you will", "you've": "you have",
+    "they're": "they are", "they'd": "they would", "they'll": "they will",
+    "he's": "he is", "she's": "she is", "it's": "it is",
+    "he'd": "he would", "she'd": "she would", "it'd": "it would",
+    "let's": "let us", "lets": "let us",
+    # Negation contractions
+    "don't": "do not", "doesn't": "does not", "didn't": "did not",
+    "can't": "can not", "couldn't": "could not",
+    "won't": "will not", "wouldn't": "would not", "shouldn't": "should not",
+    "haven't": "have not", "hasn't": "has not", "hadn't": "had not",
+    "isn't": "is not", "aren't": "are not",
+    "wasn't": "was not", "weren't": "were not",
+    # Demonstrative / existential contractions
+    "that's": "that is", "there's": "there is", "here's": "here is",
+    "what's": "what is", "who's": "who is",
+    # Informal contractions
+    "gonna": "going to", "wanna": "want to", "gotta": "got to",
+}
+
+_PREAMBLE_WORDS: frozenset[str] = frozenset(
+    # Subject pronouns
+    {"i", "we", "you", "he", "she", "they", "it", "one",
+     "somebody", "someone", "everybody", "everyone"}
+    # Object pronouns
+    | {"me", "us", "him", "her", "them",
+       "myself", "ourselves", "yourself", "yourselves"}
+    # Modal verbs
+    | {"can", "could", "would", "should", "will", "shall",
+       "may", "might", "must"}
+    # Auxiliary verbs
+    | {"do", "does", "did", "have", "has", "had",
+       "am", "is", "are", "was", "were", "be", "been", "being"}
+    # Filler verbs (appear before the actual task action in prompts)
+    | {"want", "wanting", "need", "needing", "like", "love", "wish", "hope",
+       "wonder", "wondering", "think", "thinking",
+       "try", "trying", "go", "going",
+       "start", "starting", "begin", "beginning",
+       "proceed", "suggest", "suggesting", "recommend",
+       "let", "help", "helping", "know", "figure",
+       "look", "looking", "see", "seeing"}
+    # Discourse markers
+    | {"please", "also", "actually", "basically", "just", "really",
+       "well", "so", "now", "then", "first", "next", "hey", "hi",
+       "ok", "okay", "alright", "right", "sure", "yeah", "yes",
+       "hmm", "um", "uh", "literally", "maybe", "perhaps",
+       "probably", "definitely", "certainly", "obviously", "clearly",
+       "honestly", "anyway", "anyways", "kindly"}
+    # Safe particles and connectors (only stripped in preamble context)
+    | {"to", "not", "no", "and", "or", "but", "if", "that", "ahead"}
+)
+
+
+def _expand_contractions(text: str) -> list[str]:
+    """Expand English contractions into constituent words for uniform scanning."""
+    words: list[str] = []
+    for w in text.split():
+        key = re.sub(r'[^a-z\']', '', w.lower())
+        if key in _CONTRACTIONS:
+            words.extend(_CONTRACTIONS[key].split())
+        else:
+            words.append(w)
+    return words
+
+
 def _extract_task_title(prompt: str) -> str:
+    """Extract a concise, searchable task title using linguistic preamble stripping.
+
+    Uses English closed-class word categories (pronouns, modals, auxiliaries,
+    discourse markers, filler verbs) to strip conversational preamble from
+    the start of the prompt. This is compositional — any combination of
+    function words gets stripped, unlike hardcoded prefix matching.
+
+    Example: "I would really like you to please help me to fix the bug"
+           → strips all function words → "Fix the bug"
+    """
     sentences = re.split(r'[.!?\n]', prompt)
-    title = sentences[0].strip() if sentences else prompt[:80]
-    for prefix in ["i want to ", "please ", "can you ", "let's ", "lets ",
-                    "help me ", "i need to ", "we need to "]:
-        if title.lower().startswith(prefix):
-            title = title[len(prefix):]
-    title = title.strip().capitalize()
-    if len(title) > 100:
-        title = title[:97] + "..."
+    raw = sentences[0].strip() if sentences else prompt[:120]
+    if not raw:
+        return "Untitled task"
+
+    words = _expand_contractions(raw)
+    if not words:
+        return "Untitled task"
+
+    # Greedy left-to-right scan: skip while current word is a function word.
+    # Safety: never consume the last word.
+    i = 0
+    limit = len(words) - 1
+    while i < limit:
+        cleaned = re.sub(r'[^a-z0-9]', '', words[i].lower())
+        if cleaned in _PREAMBLE_WORDS:
+            i += 1
+        else:
+            break
+
+    title = " ".join(words[i:])
+    title = title.rstrip("?!.,;:")
+    title = re.sub(r'\s+', ' ', title).strip()
+
+    if title:
+        title = title[0].upper() + title[1:]
+    if len(title) > 120:
+        title = title[:117] + "..."
+
     return title or "Untitled task"
+
+
+def _extract_intent_tags(prompt: str) -> list[str]:
+    """Extract high-signal keywords from prompt for future intent matching.
+
+    Tags are indexed by BM25 with high weight (4.5), so adding
+    domain-specific terms here dramatically improves matching when the
+    user comes back with a vague query that shares the same intent.
+    """
+    tokens = _tokenize(prompt)
+    seen: set[str] = set()
+    tags: list[str] = []
+    for t in tokens:
+        if t not in seen and len(t) >= 3:
+            seen.add(t)
+            tags.append(t)
+    return tags[:15]
+
+
+def _build_enriched_objective(prompt: str) -> str:
+    """Build an enriched objective that captures raw intent plus searchable keywords.
+
+    Appends extracted intent keywords so vague future queries like
+    "check eucatur" can match a task created from a task-specific query like
+    "fix eucatur booking failures for last 2 days".
+    """
+    raw = prompt[:400]
+    tags = _extract_intent_tags(prompt)
+    if tags:
+        return f"{raw}\n\n[Intent: {', '.join(tags)}]"
+    return raw
