@@ -83,7 +83,26 @@ python3 -m xstitch.cli auto "resume the authentication work"
 
 This uses BM25 relevance scoring to find the right task and returns a
 structured resume briefing with warnings about past failures, architecture
-decisions, and exact next steps.
+decisions, and exact next steps. If the match is plausible but not decisive,
+it returns `needs_confirmation`; ask the user which listed task to resume or
+whether to start fresh before loading context.
+
+When `auto` creates a task, it stores the full first user request as an
+`initial_user_prompt` snapshot so future agents can recover the exact ask.
+
+## Step 5.5: Optional durable project wiki
+
+Use the wiki for reusable project knowledge that should survive many tasks:
+
+```bash
+python3 -m xstitch.cli wiki init
+python3 -m xstitch.cli wiki status
+python3 -m xstitch.cli wiki log --kind query --subject "routing" --message "Captured confirmed context-routing policy."
+```
+
+Snapshots are chronological task progress. The wiki is synthesized project
+knowledge: architecture notes, recurring workflows, source summaries,
+contradictions, and reusable answers.
 
 ## Step 6: (Optional) Reboot-safe daemon
 
@@ -153,7 +172,7 @@ Once set up, everything is automatic:
 |------|-----|------------|
 | Snapshots on git commit | Git hooks (installed by auto-setup) | Yes |
 | Agent discovers Stitch | MCP tools or injected instruction files | Yes |
-| Context loaded on resume | Agent calls `python3 -m xstitch.cli auto` at session start | Yes |
+| Context loaded on resume | Agent calls `python3 -m xstitch.cli auto` at session start; ambiguous matches ask the user first | Yes |
 | Decisions/snapshots pushed | Agent instructed to push proactively | Yes |
 | Checkpoint before summarization | Agent instructed in config files | Yes |
 

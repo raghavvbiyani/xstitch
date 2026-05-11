@@ -114,8 +114,11 @@ Don't see your tool? Stitch generates `~/.ahcp/AGENT_BOOTSTRAP.md` — a univers
 | **Zero dependencies** | Pure Python stdlib. No numpy, no torch, no nothing. |
 | **MCP + instruction files** | Dual integration: native MCP tools for capable agents, injected markdown for everything else. |
 | **BM25 relevance search** | Say "resume the auth refactor" — Stitch finds it even if those words don't appear in the title. Includes trigram fuzzy matching for typo tolerance. |
+| **Safe context routing** | Stitch only auto-loads context when the match is decisive. If saved context looks plausible but ambiguous, it asks the user to choose a task or start fresh. |
 | **Resume briefings** | New agents get structured context: decisions with reasoning, failed experiments with warnings, exact next steps, and live repo state. |
 | **Cross-agent sync** | Cursor and Claude Code see the same tasks regardless of which cwd spawned the MCP. An append-only event log (`stitch_what_changed`) lets any agent discover what the others have done since it last checked. See [`docs/cross-agent-sync.md`](docs/cross-agent-sync.md). |
+| **Initial prompt capture** | Newly created tasks store the full first user request as an `initial_user_prompt` snapshot so future agents see the exact original ask. |
+| **LLM wiki** | `stitch wiki init` creates a markdown wiki for durable project knowledge that should survive many tasks. |
 | **Self-healing diagnostics** | `stitch doctor` detects broken installs, corrupted state, missing config. `stitch doctor --repair` re-homes tasks filed under the wrong project scope. |
 | **Plugin system** | Add new tools via `pyproject.toml` entry points — no core code changes needed. |
 | **Optional semantic search** | `pip install xstitch[search]` adds sentence-transformer embeddings for meaning-based task matching. |
@@ -151,12 +154,26 @@ Don't see your tool? Stitch generates `~/.ahcp/AGENT_BOOTSTRAP.md` — a univers
 1. **Agent A** works on a task — pushes decisions, snapshots, and checkpoints to Stitch
 2. You hit the token limit (or switch tools for any reason)
 3. **Agent B** opens — automatically discovers Stitch via MCP or instructions
-4. Stitch generates a **resume briefing** with the full decision history, warnings about dead ends, and exact next steps
-5. Agent B continues from where A left off — no wasted tokens, no repeated mistakes
+4. Stitch routes the request: resume a decisive match, create a new task, or ask for confirmation if multiple/plausible matches exist
+5. When a task is loaded, Stitch generates a **resume briefing** with the full decision history, warnings about dead ends, and exact next steps
+6. Agent B continues from where A left off — no wasted tokens, no repeated mistakes
 
 Task data lives at `~/.ahcp/projects/` (outside your repo, keeps it clean). Instruction files live inside the repo for agents to read.
 
 > For the full architecture, see [docs/architecture.md](docs/architecture.md).
+
+---
+
+## Context Routing Safety
+
+`stitch auto "<prompt>"` is conservative by design:
+
+- **Decisive match**: loads the task and emits a resume briefing.
+- **Clear new work**: creates a new task and stores the full original prompt in an `initial_user_prompt` snapshot.
+- **Conversational prompt**: does not load task context.
+- **Plausible but uncertain match**: returns `needs_confirmation` and lists candidate tasks instead of guessing.
+
+This prevents the failure mode where an agent silently picks an unrelated prior chat because it shares broad domain words. Agents should relay the `[TELL USER]` line and wait for the user to choose a candidate or say to start fresh.
 
 ---
 
@@ -209,7 +226,7 @@ Task data lives at `~/.ahcp/projects/` (outside your repo, keeps it clean). Inst
 
 ```bash
 stitch auto-setup              # Initialize Stitch in current project
-stitch auto "<prompt>"         # Intelligent routing: detect intent, find/create task
+stitch auto "<prompt>"         # Route safely: resume, create, or ask when ambiguous
 stitch global-setup            # Configure all AI tools on your machine
 
 stitch snap -m "message"       # Capture a snapshot
@@ -229,6 +246,7 @@ stitch events [--since ISO]    # Cross-agent sync feed: what changed since your 
 stitch mark-seen               # Advance this agent's last-seen cursor
 stitch init --pin              # Drop a .ahcp sentinel for non-git project roots
 stitch wiki init               # Optional LLM-wiki scaffold for durable project knowledge
+stitch wiki log -m "message"   # Append a wiki audit entry
 
 stitch doctor                  # Diagnose installation health
 stitch doctor --repair         # Re-home tasks filed under the wrong project scope

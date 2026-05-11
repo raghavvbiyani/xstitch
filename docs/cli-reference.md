@@ -43,18 +43,27 @@ stitch inject --tool cursor      # Specific tool
 
 ### `stitch auto "<prompt>"`
 
-The core command. Detects user intent, searches for matching tasks, and returns structured context.
+The core command. Detects user intent, searches for matching tasks, and returns structured context only when the match is decisive.
 
 ```bash
-stitch auto "resume the database migration"    # Finds matching task
-stitch auto "build a REST API for users"       # Creates new task
+stitch auto "resume the database migration"    # Loads a decisive matching task
+stitch auto "build a REST API for users"       # Creates a new task and captures the full initial prompt
 stitch auto "hi"                               # No context loaded (conversational)
+stitch auto "check eucatur issues"             # May ask for confirmation if a prior task is plausible but weak
 ```
 
 Returns formatted routing guidance with the action taken (`resumed`,
 `created`, `greeting`, `needs_confirmation`, etc.) and any context to inject.
 When confidence is not decisive, Stitch does not load context; it asks the user
 which task to resume or whether to start fresh.
+
+Routing outcomes:
+
+- `resumed`: loaded a local task and generated a briefing.
+- `resumed_cross_project`: cloned a decisive match from another project into the current project and generated a briefing.
+- `created`: created a new task and stored the full first user request as an `initial_user_prompt` snapshot.
+- `active_task_exists` or `greeting`: no full task context was loaded.
+- `needs_confirmation`: possible matches exist, but Stitch needs the user to choose a task or start fresh.
 
 ---
 

@@ -576,7 +576,7 @@ All commands: `{cli} <command>`
 
 ```
 auto-setup          Idempotent project bootstrap
-auto "<prompt>"     Intelligent routing (resume or new)
+auto "<prompt>"     Safe routing (resume, create, or confirm)
 smart-match "<q>"   Relevance search across tasks
 task new/list/show  Task management
 snap -m "msg"       Lightweight progress marker — stores `-m` text + small git fingerprint ONLY

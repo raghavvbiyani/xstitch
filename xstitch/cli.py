@@ -3,7 +3,7 @@
 Usage:
     stitch global-setup [--dry-run]        One-time: detect & configure all AI tools on this machine
     stitch auto-setup                      Per-project: idempotent bootstrap (init + inject + hooks)
-    stitch auto "<prompt>"                 Intelligent routing: detect intent, find/create task
+    stitch auto "<prompt>"                 Safe routing: resume, create, or ask when ambiguous
     stitch init                            Initialize Stitch in current project
     stitch task new "title" [-o "objective"] Create a new task
     stitch task list [--all]                 List tasks (--all for global)
@@ -131,7 +131,7 @@ def main():
     sm_p.add_argument("query", help="Keywords or user prompt to match against tasks")
 
     # --- auto ---
-    auto_p = sub.add_parser("auto", help="Intelligent routing: detect intent, find/create task, return context")
+    auto_p = sub.add_parser("auto", help="Safe routing: resume, create, or ask when ambiguous")
     auto_p.add_argument("prompt", help="User's prompt (the agent passes the user's message here)")
 
     # --- inject ---
