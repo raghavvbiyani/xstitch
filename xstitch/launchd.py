@@ -16,7 +16,7 @@ from pathlib import Path
 PLIST_LABEL = "com.stitch.daemon"
 LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
 PLIST_PATH = LAUNCH_AGENTS_DIR / f"{PLIST_LABEL}.plist"
-GLOBAL_HOME = Path.home() / ".stitch"
+GLOBAL_HOME = Path.home() / ".ahcp"
 WATCHER_SCRIPT = GLOBAL_HOME / "stitch_watcher.sh"
 
 
@@ -131,7 +131,8 @@ except Exception:
 ")
 
 for PROJECT in $PROJECTS; do
-    if [ -d "$PROJECT/.stitch" ] && [ -f "$PROJECT/.stitch/active_task" ]; then
+    if ( [ -d "$PROJECT/.ahcp" ] && [ -f "$PROJECT/.ahcp/active_task" ] ) || \
+       ( [ -d "$PROJECT/.stitch" ] && [ -f "$PROJECT/.stitch/active_task" ] ); then
         cd "$PROJECT"
         # Only snapshot if there are git changes
         if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

@@ -1,8 +1,8 @@
 """Storage engine for Stitch.
 
 Machine-local storage:
-  - Per-project data: `~/.stitch/projects/<project-key>/tasks/` (persists outside repo)
-  - Global registry: `~/.stitch/registry.json` for cross-project task discovery
+  - Per-project data: `~/.ahcp/projects/<project-key>/tasks/` (persists outside repo)
+  - Global registry: `~/.ahcp/registry.json` for cross-project task discovery
 
 All data is JSON + Markdown — no database required.
 
@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import Task, Snapshot, Decision, HandoffBundle, from_json, _now_iso
+from .project_resolver import resolve_project_path
 
 # Deduplication: skip snapshot if last one has >=80% word overlap within this window
 _DEDUP_WINDOW_SECONDS = 120
@@ -33,11 +34,14 @@ _MIN_DECISION_PROBLEM_LEN = 5
 
 # TTL: tasks not updated in this many days get cleaned up
 _TTL_DAYS = 45
-# Cleanup runs at most once per day (tracked via ~/.stitch/.last_cleanup)
+# Cleanup runs at most once per day (tracked via ~/.ahcp/.last_cleanup)
 _CLEANUP_COOLDOWN_HOURS = 24
 
-Stitch_DIR = ".stitch"
-GLOBAL_HOME = Path.home() / ".stitch"
+AHCP_DIR = ".ahcp"
+LEGACY_STITCH_DIR = ".stitch"
+# Backward-compatible alias for older imports/tests.
+Stitch_DIR = AHCP_DIR
+GLOBAL_HOME = Path.home() / ".ahcp"
 PROJECTS_HOME = GLOBAL_HOME / "projects"
 REGISTRY_FILE = "registry.json"
 ACTIVE_TASK_FILE = "active_task"
@@ -49,11 +53,18 @@ def project_key(project_path: Path) -> str:
     return f"{project_path.name}-{path_hash}"
 
 
+def _parse_task(raw) -> Optional[Task]:
+    """Convert raw JSON (from ``_read_foreign``) into a ``Task`` or None."""
+    if not isinstance(raw, dict) or not raw:
+        return None
+    return from_json(Task, raw)
+
+
 class Store:
     """Manages task context storage at project and global level."""
 
     def __init__(self, project_path: Optional[str] = None):
-        self.project_path = Path(project_path or os.getcwd()).resolve()
+        self.project_path = resolve_project_path(project_path)
         self.project_key = project_key(self.project_path)
         self.local_dir = PROJECTS_HOME / self.project_key
         self.tasks_dir = self.local_dir / "tasks"
@@ -65,10 +76,10 @@ class Store:
             print(
                 f"  [Stitch WARNING] Cannot create {GLOBAL_HOME}\n"
                 f"  [Stitch FIX] Grant write access: mkdir -p {GLOBAL_HOME} && chmod 755 {GLOBAL_HOME}\n"
-                f"  [Stitch FIX] Or set Stitch_HOME env var to a writable directory",
+                f"  [Stitch FIX] Or set AHCP_HOME env var to a writable directory",
                 file=sys.stderr,
             )
-            fallback = self.project_path / Stitch_DIR
+            fallback = self.project_path / AHCP_DIR
             self.local_dir = fallback
             self.tasks_dir = fallback / "tasks"
             return
@@ -78,14 +89,22 @@ class Store:
     # --- Migration ---
 
     def _migrate_from_repo(self):
-        """Auto-migrate task data from old in-repo .stitch/ to ~/.stitch/projects/.
+        """Auto-migrate old in-repo task data to ~/.ahcp/projects/.
 
-        Safety: copies data without deleting the original. The old .stitch/
-        is left in place so the user can verify and clean up manually.
+        Safety: copies data without deleting the original. Legacy `.stitch/`
+        and `.ahcp/` directories are both supported so existing open-source
+        installs and internal AHCP installs keep working after upgrade.
         """
-        old_dir = self.project_path / Stitch_DIR
-        old_tasks = old_dir / "tasks"
-        if not old_tasks.exists() or not any(old_tasks.iterdir()):
+        old_dir = None
+        old_tasks = None
+        for dirname in (LEGACY_STITCH_DIR, AHCP_DIR):
+            candidate = self.project_path / dirname
+            candidate_tasks = candidate / "tasks"
+            if candidate_tasks.exists() and any(candidate_tasks.iterdir()):
+                old_dir = candidate
+                old_tasks = candidate_tasks
+                break
+        if old_dir is None or old_tasks is None:
             return
         if self.tasks_dir.exists() and any(self.tasks_dir.iterdir()):
             return
@@ -106,7 +125,7 @@ class Store:
             migrated_tasks = list(self.tasks_dir.iterdir()) if self.tasks_dir.exists() else []
             if migrated_tasks:
                 log.ok(f"Migration complete. Data copied to {self.local_dir}")
-                log.info(f"Old .stitch/ left at {old_dir} — safe to delete after verifying")
+                log.info(f"Old task data left at {old_dir} — safe to delete after verifying")
             else:
                 log.warn("Migration may be incomplete — no tasks found at new location")
         except PermissionError as e:
@@ -125,7 +144,7 @@ class Store:
     def _maybe_run_ttl_cleanup(self):
         """Run TTL cleanup if cooldown has elapsed (max once per day).
 
-        Removes task data older than _TTL_DAYS from ~/.stitch/projects/.
+        Removes task data older than _TTL_DAYS from ~/.ahcp/projects/.
         Only removes completed/abandoned tasks — active tasks are never touched.
         Runs silently; errors are swallowed to never block normal operations.
         """
@@ -232,14 +251,18 @@ class Store:
 
     def _prune_registry_stale_entries(self):
         """Remove entries from the global registry whose task dirs no longer exist."""
+        from .locks import file_lock, FileLockTimeout
+
+        lock_path = GLOBAL_HOME / (REGISTRY_FILE + ".lock")
         try:
-            registry = self._load_registry()
-            tasks = registry.get("tasks", [])
-            valid = [t for t in tasks if self._task_files_exist(from_json(Task, t))]
-            if len(valid) < len(tasks):
-                registry["tasks"] = valid
-                self._save_registry(registry)
-        except Exception:
+            with file_lock(lock_path, timeout=5.0):
+                registry = self._load_registry()
+                tasks = registry.get("tasks", [])
+                valid = [t for t in tasks if self._task_files_exist(from_json(Task, t))]
+                if len(valid) < len(tasks):
+                    registry["tasks"] = valid
+                    self._save_registry(registry)
+        except (FileLockTimeout, Exception):
             pass
 
     # --- Initialization ---
@@ -254,7 +277,7 @@ class Store:
             print(
                 f"  [Stitch ERROR] Cannot write to {self.local_dir}\n"
                 f"  [Stitch FIX] Grant write access: chmod -R 755 {self.local_dir.parent}\n"
-                f"  [Stitch FIX] Or ask your admin to allow writes to ~/.stitch/",
+                f"  [Stitch FIX] Or ask your admin to allow writes to {GLOBAL_HOME}",
                 file=sys.stderr,
             )
             raise
@@ -287,20 +310,56 @@ class Store:
 
         self._set_active_task(task.id)
         self._register_task(task)
+        self._emit_event("task_created", task.id, meta={"title": task.title})
         return task
 
     def get_task(self, task_id: str) -> Optional[Task]:
+        """Fetch a task by id with cross-project read-through.
+
+        Tries the current project first (fast path). If the task lives in
+        another project (common when multiple agents write from different
+        cwds), falls back to the global registry to find the owning project
+        and reads from there. This preserves the ``Store`` == one project
+        invariant while making lookups-by-id work everywhere.
+        """
         meta_file = self.tasks_dir / task_id / "meta.json"
-        if not meta_file.exists():
+        if meta_file.exists():
+            data = self._read_json(meta_file)
+            return from_json(Task, data)
+        return self._read_foreign(task_id, "meta.json", parser=_parse_task)
+
+    def for_task(self, task_id: str) -> Optional["Store"]:
+        """Return a ``Store`` rooted at the project that owns ``task_id``.
+
+        Returns ``self`` when the task is already local. Returns a transient
+        ``Store`` pointing at the owner project otherwise. Returns ``None``
+        if the task is not found in the global registry.
+
+        Callers that need to read multiple sibling files (decisions,
+        snapshots, handoff) should use this to avoid repeated registry
+        lookups.
+        """
+        if self.task_is_local(task_id):
+            return self
+        owner = self.get_task_project_path(task_id)
+        if not owner:
             return None
-        data = self._read_json(meta_file)
-        return from_json(Task, data)
+        try:
+            return Store(owner)
+        except (OSError, PermissionError):
+            return None
 
     def update_task(self, task: Task):
         task.touch()
         task_dir = self.tasks_dir / task.id
         self._write_json(task_dir / "meta.json", asdict(task))
         self._register_task(task)
+        self._emit_event(
+            "task_updated",
+            task.id,
+            project_path_override=task.project_path,
+            meta={"status": task.status},
+        )
 
     def list_tasks(self, project_only: bool = True) -> list[Task]:
         if project_only:
@@ -318,12 +377,24 @@ class Store:
         # Auto-prune stale entries (task files deleted / /tmp cleaned)
         valid = [t for t in tasks if self._task_files_exist(t)]
         if len(valid) < len(tasks):
-            valid_ids = {t.id for t in valid}
-            registry["tasks"] = [
-                t for t in registry.get("tasks", [])
-                if t.get("id") in valid_ids
-            ]
-            self._save_registry(registry)
+            from .locks import file_lock, FileLockTimeout
+            lock_path = GLOBAL_HOME / (REGISTRY_FILE + ".lock")
+            try:
+                with file_lock(lock_path, timeout=5.0):
+                    # Re-read under lock to avoid clobbering concurrent writes.
+                    registry = self._load_registry()
+                    tasks_now = [from_json(Task, t) for t in registry.get("tasks", [])]
+                    valid_now = [t for t in tasks_now if self._task_files_exist(t)]
+                    if len(valid_now) < len(tasks_now):
+                        valid_ids = {t.id for t in valid_now}
+                        registry["tasks"] = [
+                            t for t in registry.get("tasks", [])
+                            if t.get("id") in valid_ids
+                        ]
+                        self._save_registry(registry)
+                    valid = valid_now
+            except FileLockTimeout:
+                pass
 
         return valid
 
@@ -337,7 +408,7 @@ class Store:
         new_meta = PROJECTS_HOME / key / "tasks" / task.id / "meta.json"
         if new_meta.exists():
             return True
-        old_meta = proj_path / Stitch_DIR / "tasks" / task.id / "meta.json"
+        old_meta = proj_path / AHCP_DIR / "tasks" / task.id / "meta.json"
         return old_meta.exists()
 
     def task_is_local(self, task_id: str) -> bool:
@@ -398,6 +469,11 @@ class Store:
         if len(snaps) > 100:
             snaps = snaps[-100:]
         self._write_json(snap_file, snaps)
+        self._emit_event(
+            "snapshot_added",
+            task_id,
+            meta={"source": snapshot.source, "message_preview": (snapshot.message or "")[:120]},
+        )
         return None
 
     @staticmethod
@@ -427,9 +503,12 @@ class Store:
 
     def get_snapshots(self, task_id: str, limit: int = 10) -> list[Snapshot]:
         snap_file = self.tasks_dir / task_id / "snapshots.json"
-        if not snap_file.exists():
-            return []
-        data = self._read_json(snap_file)
+        if snap_file.exists():
+            data = self._read_json(snap_file)
+        else:
+            data = self._read_foreign(task_id, "snapshots.json", parser=lambda x: x)
+            if data is None:
+                return []
         data.sort(key=lambda s: s.get("timestamp", ""))
         return [from_json(Snapshot, s) for s in data[-limit:]]
 
@@ -462,13 +541,21 @@ class Store:
         # Keep sorted by timestamp
         decs.sort(key=lambda d: d.get("timestamp", ""))
         self._write_json(dec_file, decs)
+        self._emit_event(
+            "decision_added",
+            task_id,
+            meta={"problem_preview": problem[:120]},
+        )
         return None
 
     def get_decisions(self, task_id: str) -> list[Decision]:
         dec_file = self.tasks_dir / task_id / "decisions.json"
-        if not dec_file.exists():
-            return []
-        data = self._read_json(dec_file)
+        if dec_file.exists():
+            data = self._read_json(dec_file)
+        else:
+            data = self._read_foreign(task_id, "decisions.json", parser=lambda x: x)
+            if data is None:
+                return []
         data.sort(key=lambda d: d.get("timestamp", ""))
         return [from_json(Decision, d) for d in data]
 
@@ -486,9 +573,22 @@ class Store:
             key_decisions=decisions[-5:],
             token_budget=token_budget,
         )
-        # Write generated handoff to disk
-        handoff_file = self.tasks_dir / task_id / "handoff.md"
-        handoff_file.write_text(bundle.to_markdown())
+        # Write the handoff under the owning project's storage (so it lives
+        # next to meta.json/snapshots/decisions regardless of which project
+        # scope initiated the build).
+        handoff_dir = self._owning_task_dir(task_id)
+        if handoff_dir is not None:
+            try:
+                handoff_dir.mkdir(parents=True, exist_ok=True)
+                (handoff_dir / "handoff.md").write_text(bundle.to_markdown())
+            except OSError:
+                pass
+        self._emit_event(
+            "handoff_built",
+            task_id,
+            project_path_override=task.project_path,
+            meta={"token_budget": token_budget},
+        )
         return bundle
 
     # --- Search ---
@@ -542,6 +642,32 @@ class Store:
         reg_file.write_text(json.dumps(registry, indent=2, default=str))
 
     def _register_task(self, task: Task):
+        """Atomically update the global registry with this task's metadata.
+
+        Uses a file lock so parallel MCP/CLI processes writing concurrently
+        cannot lose updates (previously two agents could overwrite each
+        other's registry entries).
+        """
+        from .locks import file_lock, FileLockTimeout
+
+        lock_path = GLOBAL_HOME / (REGISTRY_FILE + ".lock")
+        try:
+            with file_lock(lock_path, timeout=5.0):
+                self._register_task_unlocked(task)
+        except FileLockTimeout:
+            # Best-effort fallback: continue without the lock so a stuck
+            # peer cannot permanently block new writes. Log, but don't
+            # raise — registry staleness is recoverable; data loss on the
+            # main path (meta.json) is not.
+            import sys
+            print(
+                f"  [Stitch WARNING] Registry lock timed out; proceeding without "
+                f"lock for task {task.id}",
+                file=sys.stderr,
+            )
+            self._register_task_unlocked(task)
+
+    def _register_task_unlocked(self, task: Task):
         registry = self._load_registry()
         tasks = registry.get("tasks", [])
 
@@ -561,7 +687,11 @@ class Store:
     # --- Context file (human-readable living doc) ---
 
     def update_context_file(self, task_id: str):
-        """Regenerate the human-readable context.md for a task."""
+        """Regenerate the human-readable context.md for a task.
+
+        Writes the file under the owning project's storage, even when the
+        caller is operating from a different project scope.
+        """
         task = self.get_task(task_id)
         if not task:
             return
@@ -598,7 +728,19 @@ class Store:
                 lines.append(s.to_markdown())
             lines.append("")
 
-        (self.tasks_dir / task_id / "context.md").write_text("\n".join(lines))
+        task_dir = self._owning_task_dir(task_id)
+        if task_dir is None:
+            return
+        try:
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "context.md").write_text("\n".join(lines))
+        except OSError:
+            pass
+        self._emit_event(
+            "context_updated",
+            task_id,
+            project_path_override=task.project_path,
+        )
 
     # --- Agent instructions ---
 
@@ -610,7 +752,7 @@ class Store:
             "Stitch prevents duplicate notes automatically — push freely.\n\n"
             "## For AI Agents\n"
             f"1. Run `{cli} auto-setup` then `{cli} auto \"<user message>\"` at session start.\n"
-            "2. Read `.stitch/tasks/<task-id>/context.md` for full context.\n"
+            "2. Read the task files under `~/.ahcp/projects/<project-key>/tasks/<task-id>/` for full context.\n"
             "3. Check `decisions.json` before making decisions — avoid repeating failed experiments.\n\n"
             "### WHEN to Push\n"
             f"- After completing a sub-task: `{cli} snap -m \"what was done + outcome\"`\n"
@@ -623,6 +765,76 @@ class Store:
             f"- `{cli} handoff` — get a copy-pasteable context bundle for a new AI tool\n"
             f"- `{cli} search <query>` — find tasks by keyword\n"
         )
+
+    # --- Event log emission ---
+
+    def _emit_event(
+        self,
+        event_type: str,
+        task_id: str,
+        project_path_override: Optional[str] = None,
+        meta: Optional[dict] = None,
+    ) -> None:
+        """Append a global event for this mutation.
+
+        Best-effort: never raises, never blocks the main write path.
+        """
+        try:
+            from . import event_log
+            event_log.append_event(
+                event_type=event_type,
+                task_id=task_id,
+                project_path=project_path_override or str(self.project_path),
+                meta=meta,
+            )
+        except Exception as e:  # defensive — event log MUST NOT break writes
+            import sys
+            print(
+                f"  [Stitch WARNING] event_log.append_event failed for "
+                f"{event_type}/{task_id}: {e}",
+                file=sys.stderr,
+            )
+
+    # --- Cross-project read-through helpers ---
+
+    def _owning_task_dir(self, task_id: str) -> Optional[Path]:
+        """Return the task directory inside the project that owns the task.
+
+        Falls back to ``self.tasks_dir / task_id`` if the task is local or
+        the registry has no entry for it.
+        """
+        local = self.tasks_dir / task_id
+        if (local / "meta.json").exists():
+            return local
+        owner_path = self.get_task_project_path(task_id)
+        if not owner_path:
+            return local
+        owner_key = project_key(Path(owner_path))
+        return PROJECTS_HOME / owner_key / "tasks" / task_id
+
+    def _read_foreign(self, task_id: str, filename: str, parser):
+        """Read a per-task file from the owning project's scope.
+
+        Returns ``None`` when the task is unknown or the file doesn't exist.
+        The ``parser`` callable transforms the raw loaded JSON (e.g., wrap
+        into a ``Task`` model).
+        """
+        owner_path = self.get_task_project_path(task_id)
+        if not owner_path:
+            return None
+        owner_key = project_key(Path(owner_path))
+        owner_file = PROJECTS_HOME / owner_key / "tasks" / task_id / filename
+        if not owner_file.exists():
+            # Try legacy in-repo ``.ahcp/`` layout as a last resort (matches
+            # _task_files_exist semantics).
+            legacy = Path(owner_path) / AHCP_DIR / "tasks" / task_id / filename
+            if not legacy.exists():
+                return None
+            owner_file = legacy
+        try:
+            return parser(self._read_json(owner_file))
+        except Exception:
+            return None
 
     # --- Helpers ---
 

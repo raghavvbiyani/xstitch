@@ -25,10 +25,10 @@ Stitch is a Python package with zero external dependencies.
 
 ```bash
 # Option A: From a local clone
-pip3 install -e /path/to/AgentHandOffAndContextProtocol
+pip3 install -e /path/to/xstitch
 
 # Option B: From GitHub (replace with actual URL when published)
-# pip3 install git+https://github.com/<owner>/AgentHandOffAndContextProtocol.git
+# pip3 install git+https://github.com/raghavvbiyani/xstitch.git
 ```
 
 If `pip3` is not available, try `pip` or `python3 -m pip install -e ...`.
@@ -46,7 +46,7 @@ This detects installed AI tools and auto-configures each one:
   Registers `xstitch.mcp_server` so you get 14 native Stitch tools in every session.
 - **Instruction-file tools** (Codex, Gemini CLI, Aider):
   Adds the Stitch session protocol to global instruction files.
-- **All tools**: Generates `~/.stitch/AGENT_BOOTSTRAP.md` as a universal fallback.
+- **All tools**: Generates `~/.ahcp/AGENT_BOOTSTRAP.md` as a universal fallback.
 
 After running, **restart any open AI tools** (Cursor, Windsurf, etc.) to load
 the new MCP configuration.
@@ -61,7 +61,7 @@ python3 -m xstitch.cli auto-setup
 ```
 
 This is idempotent (safe to run repeatedly). It will:
-1. Create `.stitch/` directory structure
+1. Create `.ahcp/` directory structure
 2. Inject the Stitch protocol into all project-level config files:
    `CLAUDE.md`, `.cursorrules`, `AGENTS.md`, `GEMINI.md`, `.windsurfrules`,
    `CONVENTIONS.md`, `.github/copilot-instructions.md`
@@ -119,7 +119,7 @@ If your tool supports MCP (Model Context Protocol), add this to its config:
 
 If your tool reads instruction files, tell it:
 
-> Read `~/.stitch/AGENT_BOOTSTRAP.md` and follow its protocol.
+> Read `~/.ahcp/AGENT_BOOTSTRAP.md` and follow its protocol.
 
 That file contains everything needed to use Stitch via CLI commands.
 

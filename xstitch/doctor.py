@@ -44,7 +44,8 @@ def run_doctor(project_path: str | None = None, verbose: bool = False) -> list[d
     from .store import PROJECTS_HOME, project_key as _project_key
     pkey = _project_key(project)
     proj_data_dir = PROJECTS_HOME / pkey
-    old_stitch_dir = project / ".stitch"
+    legacy_stitch_dir = project / ".stitch"
+    legacy_ahcp_dir = project / ".ahcp"
 
     if proj_data_dir.exists() and (proj_data_dir / "tasks").exists():
         results.append({
@@ -54,12 +55,20 @@ def run_doctor(project_path: str | None = None, verbose: bool = False) -> list[d
             "detail": f"Data at {proj_data_dir}",
             "fix": "",
         })
-    elif old_stitch_dir.exists() and (old_stitch_dir / "tasks").exists():
+    elif legacy_ahcp_dir.exists() and (legacy_ahcp_dir / "tasks").exists():
         results.append({
             "category": "Project",
             "name": "Stitch initialized",
             "status": WARN,
-            "detail": f"Legacy .stitch/ in repo (will auto-migrate on next run)",
+            "detail": "Legacy in-repo .ahcp/ task data (will auto-migrate on next run)",
+            "fix": "Run: python3 -m xstitch.cli auto-setup",
+        })
+    elif legacy_stitch_dir.exists() and (legacy_stitch_dir / "tasks").exists():
+        results.append({
+            "category": "Project",
+            "name": "Stitch initialized",
+            "status": WARN,
+            "detail": "Legacy in-repo .stitch/ task data (will auto-migrate on next run)",
             "fix": "Run: python3 -m xstitch.cli auto-setup",
         })
     else:
@@ -69,6 +78,39 @@ def run_doctor(project_path: str | None = None, verbose: bool = False) -> list[d
             "status": WARN,
             "detail": "No Stitch data found for this project",
             "fix": "Run: python3 -m xstitch.cli auto-setup",
+        })
+
+    # --- Orphaned task check (cross-agent-sync diagnosis) ---
+    try:
+        from .repair import scan_orphans
+        orphans = scan_orphans()
+        if orphans:
+            results.append({
+                "category": "Project",
+                "name": "Orphaned tasks",
+                "status": WARN,
+                "detail": (
+                    f"{len(orphans)} task(s) stored under a project scope that "
+                    f"disagrees with their meta.project_path. Likely a cross-agent "
+                    f"path-resolution mismatch (e.g. Cursor MCP spawned with cwd=home)."
+                ),
+                "fix": "Run: python3 -m xstitch.cli doctor --repair  (or --repair --dry-run first)",
+            })
+        else:
+            results.append({
+                "category": "Project",
+                "name": "Orphaned tasks",
+                "status": PASS,
+                "detail": "No orphans detected",
+                "fix": "",
+            })
+    except Exception as e:
+        results.append({
+            "category": "Project",
+            "name": "Orphaned tasks",
+            "status": WARN,
+            "detail": f"Could not scan for orphans: {e}",
+            "fix": "",
         })
 
     active_task_file = proj_data_dir / "active_task"
@@ -178,7 +220,7 @@ def run_doctor(project_path: str | None = None, verbose: bool = False) -> list[d
         })
 
     # --- Global setup checks ---
-    global_home = Path.home() / ".stitch"
+    global_home = Path.home() / ".ahcp"
     if global_home.exists():
         results.append({
             "category": "Global",
@@ -192,7 +234,7 @@ def run_doctor(project_path: str | None = None, verbose: bool = False) -> list[d
             "category": "Global",
             "name": "Global home",
             "status": WARN,
-            "detail": "~/.stitch/ not found",
+            "detail": "~/.ahcp/ not found",
             "fix": "Run: python3 -m xstitch.cli global-setup",
         })
 

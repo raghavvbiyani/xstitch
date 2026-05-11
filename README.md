@@ -103,7 +103,7 @@ stitch auto-setup
 | **Continue.dev** | MCP server |
 | **Aider** | `CONVENTIONS.md` read directive |
 
-Don't see your tool? Stitch generates `~/.stitch/AGENT_BOOTSTRAP.md` — a universal fallback that works with any agent that can run shell commands. And the [plugin system](docs/adding-tools.md) makes adding new tools straightforward.
+Don't see your tool? Stitch generates `~/.ahcp/AGENT_BOOTSTRAP.md` — a universal fallback that works with any agent that can run shell commands. And the [plugin system](docs/adding-tools.md) makes adding new tools straightforward.
 
 ---
 
@@ -115,7 +115,8 @@ Don't see your tool? Stitch generates `~/.stitch/AGENT_BOOTSTRAP.md` — a unive
 | **MCP + instruction files** | Dual integration: native MCP tools for capable agents, injected markdown for everything else. |
 | **BM25 relevance search** | Say "resume the auth refactor" — Stitch finds it even if those words don't appear in the title. Includes trigram fuzzy matching for typo tolerance. |
 | **Resume briefings** | New agents get structured context: decisions with reasoning, failed experiments with warnings, exact next steps, and live repo state. |
-| **Self-healing diagnostics** | `stitch doctor` detects broken installs, corrupted state, missing config. Suggests exact fix commands. |
+| **Cross-agent sync** | Cursor and Claude Code see the same tasks regardless of which cwd spawned the MCP. An append-only event log (`stitch_what_changed`) lets any agent discover what the others have done since it last checked. See [`docs/cross-agent-sync.md`](docs/cross-agent-sync.md). |
+| **Self-healing diagnostics** | `stitch doctor` detects broken installs, corrupted state, missing config. `stitch doctor --repair` re-homes tasks filed under the wrong project scope. |
 | **Plugin system** | Add new tools via `pyproject.toml` entry points — no core code changes needed. |
 | **Optional semantic search** | `pip install xstitch[search]` adds sentence-transformer embeddings for meaning-based task matching. |
 | **TTL cleanup** | Old task data (>45 days) is automatically pruned to save disk space. |
@@ -153,7 +154,7 @@ Don't see your tool? Stitch generates `~/.stitch/AGENT_BOOTSTRAP.md` — a unive
 4. Stitch generates a **resume briefing** with the full decision history, warnings about dead ends, and exact next steps
 5. Agent B continues from where A left off — no wasted tokens, no repeated mistakes
 
-Task data lives at `~/.stitch/projects/` (outside your repo, keeps it clean). Instruction files live inside the repo for agents to read.
+Task data lives at `~/.ahcp/projects/` (outside your repo, keeps it clean). Instruction files live inside the repo for agents to read.
 
 > For the full architecture, see [docs/architecture.md](docs/architecture.md).
 
@@ -223,7 +224,13 @@ stitch search "query"          # Search tasks by keyword
 stitch smart-match "query"     # BM25 relevance search across tasks
 stitch resume                  # Generate structured resume briefing
 stitch handoff                 # Generate handoff bundle
+
+stitch events [--since ISO]    # Cross-agent sync feed: what changed since your cursor
+stitch mark-seen               # Advance this agent's last-seen cursor
+stitch init --pin              # Drop a .ahcp sentinel for non-git project roots
+
 stitch doctor                  # Diagnose installation health
+stitch doctor --repair         # Re-home tasks filed under the wrong project scope
 ```
 
 > Full CLI documentation: [docs/cli-reference.md](docs/cli-reference.md)
@@ -233,6 +240,7 @@ stitch doctor                  # Diagnose installation health
 ## Documentation
 
 - [Architecture](docs/architecture.md) — system design, module structure, design decisions
+- [Cross-Agent Sync](docs/cross-agent-sync.md) — resolver, event log, repair flow (v0.4.0)
 - [Search Engine Design](docs/search-design.md) — BM25, fuzzy matching, embeddings, score fusion
 - [Adding New Tools](docs/adding-tools.md) — plugin system, entry points, integration guide
 - [Contributing](CONTRIBUTING.md) — development workflow, code style, testing

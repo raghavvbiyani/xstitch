@@ -13,7 +13,7 @@ Integration strategy (layered — strongest mechanism available per tool):
   2. Instruction files — fallback for tools without MCP or as a complement.
      Used for Codex (AGENTS.md), Gemini (GEMINI.md), Aider (CONVENTIONS.md).
   3. Deterministic hooks — guaranteed execution (Claude Code UserPromptSubmit).
-  4. Universal bootstrap — ~/.stitch/AGENT_BOOTSTRAP.md for unknown/future tools.
+  4. Universal bootstrap — ~/.ahcp/AGENT_BOOTSTRAP.md for unknown/future tools.
 
 Tools that support MCP get BOTH MCP registration AND instruction files. The MCP
 path gives agents native callable tools; the instruction file ensures the agent
@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .discovery import Stitch_SECTION_MARKER, _inject_into_file
 
-GLOBAL_HOME = Path.home() / ".stitch"
+GLOBAL_HOME = Path.home() / ".ahcp"
 
 def _resolve_python_bin() -> str:
     """Resolve the most reliable python3 path, handling virtualenvs and pyenv."""
@@ -56,7 +56,27 @@ PYTHON_BIN = _resolve_python_bin()
 MCP_SERVER_ENTRY = {
     "command": PYTHON_BIN,
     "args": ["-u", "-m", "xstitch.mcp_server"],
+    # Hosts that substitute ${workspaceFolder} (Cursor, Windsurf, Zed, Claude
+    # Code, etc.) let the MCP subprocess inherit the real workspace even
+    # when the host spawns it with a different cwd. Hosts that don't expand
+    # the placeholder will pass the literal string which resolve_project_path
+    # detects as invalid and falls back to its ancestor walk. Safe either way.
+    "env": {
+        "AHCP_PROJECT_PATH": "${workspaceFolder}",
+    },
 }
+
+
+def _agent_env(agent: str) -> dict:
+    """Build the MCP ``env`` block for a tool, tagging the agent identity.
+
+    The ``AHCP_AGENT`` tag is used by the event log so downstream agents can
+    filter 'what changed' by who changed it.
+    """
+    return {
+        "AHCP_PROJECT_PATH": "${workspaceFolder}",
+        "AHCP_AGENT": agent,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -293,21 +313,26 @@ class AiderTool(_PathDetectMixin, ToolIntegration):
 ALL_TOOLS: list[ToolIntegration] = [
     JsonMcpTool("Cursor", detect_paths=[Path.home() / ".cursor"],
                 config_path=Path.home() / ".cursor" / "mcp.json",
-                skill_dir=".cursor/skills"),
+                skill_dir=".cursor/skills",
+                extra_fields={"env": _agent_env("cursor")}),
     JsonMcpTool("Windsurf", detect_paths=[Path.home() / ".codeium" / "windsurf"],
-                config_path=Path.home() / ".codeium" / "windsurf" / "mcp_config.json"),
+                config_path=Path.home() / ".codeium" / "windsurf" / "mcp_config.json",
+                extra_fields={"env": _agent_env("windsurf")}),
     JsonMcpTool("Zed", detect_paths=[Path.home() / ".config" / "zed"],
                 config_path=Path.home() / ".config" / "zed" / "settings.json",
-                mcp_key="context_servers", extra_fields={"source": "custom"}),
+                mcp_key="context_servers",
+                extra_fields={"source": "custom", "env": _agent_env("zed")}),
     ContinueTool(),
     ClaudeCodeTool(),
     CodexTool(),
     JsonMcpTool("Gemini CLI", detect_paths=[Path.home() / ".gemini"],
                 config_path=Path.home() / ".gemini" / "settings.json",
-                instructions_file=Path.home() / ".gemini" / "GEMINI.md"),
+                instructions_file=Path.home() / ".gemini" / "GEMINI.md",
+                extra_fields={"env": _agent_env("gemini-cli")}),
     JsonMcpTool("Copilot CLI", detect_paths=[Path.home() / ".copilot"],
                 detect_cmd="copilot",
-                config_path=Path.home() / ".copilot" / "mcp-config.json"),
+                config_path=Path.home() / ".copilot" / "mcp-config.json",
+                extra_fields={"env": _agent_env("copilot-cli")}),
     AiderTool(),
 ]
 
@@ -431,7 +456,7 @@ def inject_instructions_for_tool(tool: ToolIntegration, dry_run: bool = False) -
 
 
 def generate_bootstrap(configured_tools: list[str]) -> Path:
-    """Generate ~/.stitch/AGENT_BOOTSTRAP.md — the universal fallback for any agent."""
+    """Generate ~/.ahcp/AGENT_BOOTSTRAP.md — the universal fallback for any agent."""
     GLOBAL_HOME.mkdir(parents=True, exist_ok=True)
     bootstrap_path = GLOBAL_HOME / "AGENT_BOOTSTRAP.md"
 
@@ -486,10 +511,28 @@ Push **immediately** when any of these happen:
 {cli} snap -m "Progress: 4/7 endpoints migrated. Users, Auth, Products, Orders done."
 ```
 
+## `snap` vs `checkpoint` — Pick the Right Tool
+
+`snap -m` and `checkpoint` are NOT interchangeable. Choose based on what
+you're trying to preserve:
+
+| Use | Command | What gets stored |
+|-----|---------|------------------|
+| One-line progress marker, milestone, failure note | `snap -m "..."` | Your `-m` string + a small git fingerprint (branch, `git status --short` ≤ 800 chars, `git diff --stat` ≤ 1500 chars, top 10 commits ≤ 600 chars, first 20 changed files). **Nothing else.** |
+| Non-trivial reasoning, multi-step investigation, pre-summarization handoff | `checkpoint -s/-d/-e/-f/-q` | Summary + structured `decisions_made / experiments / failures / open_questions` fields that survive chat-context summarization and are indexed by BM25 for future resume. |
+
+**`snap -m` does NOT auto-capture your chat, tool calls, files read, or reasoning.**
+Whatever you did not put into the `-m` string is lost when your context window rolls over.
+If you just finished a non-trivial investigation, use `checkpoint`, not `snap`.
+
 ## WHAT to Include
 
-Every snapshot: **What** was done + **What** was the result. Be specific.
+Every snapshot: **What** was done + **What** was the result. Be specific — the
+`-m` string is the only free-form content that survives.
 Every decision: **What** problem + **What** chosen + **What** rejected + **Why**.
+Every checkpoint: pass ALL five fields (`-s`, `-d`, `-e`, `-f`, `-q`). Empty
+ones are fine; the point is to force yourself to audit each category before
+the context rolls.
 
 ## Before Session End or Context Summarization
 
@@ -531,9 +574,9 @@ auto-setup          Idempotent project bootstrap
 auto "<prompt>"     Intelligent routing (resume or new)
 smart-match "<q>"   Relevance search across tasks
 task new/list/show  Task management
-snap -m "msg"       Snapshot with git state
+snap -m "msg"       Lightweight progress marker — stores `-m` text + small git fingerprint ONLY
 decide -p/-c/-a/-r  Log decision with tradeoffs
-checkpoint -s/-d/-e/-f/-q  Rich pre-summarization save
+checkpoint -s/-d/-e/-f/-q  Rich pre-summarization save — use for non-trivial reasoning
 resume              Structured resume briefing
 handoff             Token-budget-aware handoff bundle
 inject              Inject into project-level config files
@@ -662,11 +705,23 @@ def _inject_json_mcp(
 
     servers = config.setdefault(mcp_key, {})
 
-    entry = {**MCP_SERVER_ENTRY, **extra_fields}
+    # Merge env blocks (don't let extra_fields clobber AHCP_PROJECT_PATH).
+    base_env = dict(MCP_SERVER_ENTRY.get("env") or {})
+    extra_env = dict(extra_fields.get("env") or {})
+    extra_fields_no_env = {k: v for k, v in extra_fields.items() if k != "env"}
+    entry = {
+        **MCP_SERVER_ENTRY,
+        **extra_fields_no_env,
+        "env": {**base_env, **extra_env},
+    }
 
-    if "xstitch" in servers:
-        if servers["xstitch"] == entry:
-            return f"Already registered in {config_path}"
+    existing = servers.get("xstitch")
+    if existing == entry:
+        return f"Already registered in {config_path}"
+
+    # If an older Stitch entry is registered without the env block we added
+    # in the cross-agent-sync feature, upgrade it in place (idempotent).
+    if existing is not None:
         servers["xstitch"] = entry
         config_path.write_text(json.dumps(config, indent=2) + "\n")
         return f"Updated stale config in {config_path}"
@@ -692,7 +747,7 @@ def _inject_claude_code_mcp(dry_run: bool) -> str:
         "type": "stdio",
         "command": PYTHON_BIN,
         "args": ["-u", "-m", "xstitch.mcp_server"],
-        "env": {},
+        "env": _agent_env("claude-code"),
     }
 
     claude_config = Path.home() / ".claude.json"

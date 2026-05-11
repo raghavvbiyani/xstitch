@@ -26,7 +26,7 @@ cd /your/project
 stitch auto-setup
 ```
 
-Injects protocol instructions into project-level config files and initializes task storage at `~/.stitch/projects/<project-key>/`.
+Injects protocol instructions into project-level config files and initializes task storage at `~/.ahcp/projects/<project-key>/`.
 
 ### `stitch inject`
 

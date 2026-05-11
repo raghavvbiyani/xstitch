@@ -158,59 +158,71 @@ def inject_agent_discovery(project_path: str, force_all: bool = False):
                 skipped.append((rel_path, target["agent"]))
                 continue
 
-        if target["content"] == "mdc":
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(
-                "---\n"
-                "description: \"Stitch context protocol — run stitch_auto_route at session start\"\n"
-                "alwaysApply: true\n"
-                "---\n\n"
-                + CURSORRULES_INJECTION.replace(Stitch_SECTION_MARKER, "").strip()
-                + "\n"
-            )
-            injected.append(rel_path)
-        elif target["content"] == "mcp":
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            if _inject_into_file(full_path, CURSORRULES_INJECTION):
+        try:
+            if target["content"] == "mdc":
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                full_path.write_text(
+                    "---\n"
+                    "description: \"Stitch context protocol — run stitch_auto_route at session start\"\n"
+                    "alwaysApply: true\n"
+                    "---\n\n"
+                    + CURSORRULES_INJECTION.replace(Stitch_SECTION_MARKER, "").strip()
+                    + "\n"
+                )
                 injected.append(rel_path)
-        elif target["content"] == "cli":
-            if _inject_into_file(full_path, CLAUDE_MD_INJECTION):
-                injected.append(rel_path)
+            elif target["content"] == "mcp":
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+                if _inject_into_file(full_path, CURSORRULES_INJECTION):
+                    injected.append(rel_path)
+            elif target["content"] == "cli":
+                if _inject_into_file(full_path, CLAUDE_MD_INJECTION):
+                    injected.append(rel_path)
+        except OSError:
+            skipped.append((rel_path, f"{target['agent']} (read-only)"))
 
     if injected:
         print(f"Injected Stitch discovery into: {', '.join(injected)}", file=sys.stderr)
-    else:
+    elif not skipped:
         print("All agent config files already have Stitch injections.", file=sys.stderr)
 
     if skipped:
         names = ", ".join(f"{agent}" for _, agent in skipped)
-        print(f"Skipped (not installed): {names}", file=sys.stderr)
+        print(f"Skipped: {names}", file=sys.stderr)
 
-    _update_gitignore(project)
+    try:
+        _update_gitignore(project)
+    except OSError:
+        pass
 
     _generate_page_index(project)
 
 
 def _inject_into_file(file_path: Path, content: str) -> bool:
-    """Inject content into a file, replacing existing Stitch section if present."""
-    if file_path.exists():
-        existing = file_path.read_text()
-        if Stitch_SECTION_MARKER in existing:
-            parts = existing.split(Stitch_SECTION_MARKER)
-            if len(parts) >= 3:
-                # Properly paired markers — replace the section between them
-                new_content = parts[0] + content + parts[-1]
-                file_path.write_text(new_content)
+    """Inject content into a file, replacing existing Stitch section if present.
+
+    Returns False (instead of crashing) if the file or directory is read-only.
+    Stitch context tracking works independently of injection — these files are
+    convenience hints for agents, not required for core functionality.
+    """
+    try:
+        if file_path.exists():
+            existing = file_path.read_text()
+            if Stitch_SECTION_MARKER in existing:
+                parts = existing.split(Stitch_SECTION_MARKER)
+                if len(parts) >= 3:
+                    new_content = parts[0] + content + parts[-1]
+                    file_path.write_text(new_content)
+                    return True
+                cleaned = existing.replace(Stitch_SECTION_MARKER, "").rstrip()
+                file_path.write_text(cleaned + "\n\n" + content)
                 return True
-            # Corrupted: odd number of markers. Strip all markers and re-inject.
-            cleaned = existing.replace(Stitch_SECTION_MARKER, "").rstrip()
-            file_path.write_text(cleaned + "\n\n" + content)
+            file_path.write_text(existing + "\n\n" + content)
             return True
-        file_path.write_text(existing + "\n\n" + content)
-        return True
-    else:
-        file_path.write_text(content)
-        return True
+        else:
+            file_path.write_text(content)
+            return True
+    except OSError:
+        return False
 
 
 _GITIGNORE_MARKER = "# Stitch-AUTO-MANAGED"
@@ -219,12 +231,12 @@ _GITIGNORE_MARKER = "# Stitch-AUTO-MANAGED"
 def _update_gitignore(project: Path):
     """Add Stitch task data directory to .gitignore (idempotent).
 
-    Only gitignores .stitch/ (legacy task data). Instruction files like
+    Gitignores both legacy .stitch/ and current .ahcp/ task data. Instruction files like
     CLAUDE.md, AGENTS.md, .cursorrules etc. are NOT gitignored because
     agents must be able to read them at session start.
     """
     gitignore = project / ".gitignore"
-    entries = [".stitch/"]
+    entries = [".ahcp/", ".stitch/"]
 
     section = (
         f"{_GITIGNORE_MARKER}\n"
@@ -302,4 +314,4 @@ def _generate_page_index(project: Path):
         lines.append("")
 
     index_md.write_text("\n".join(lines))
-    print(f"Generated task index at .stitch/TASK_INDEX.md", file=sys.stderr)
+    print(f"Generated task index at {index_md}", file=sys.stderr)

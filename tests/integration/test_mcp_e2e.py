@@ -53,7 +53,8 @@ class TestMCPProtocolE2E:
             tool_names = {t["name"] for t in resp["result"]["tools"]}
             assert "stitch_auto_route" in tool_names
             assert "stitch_snapshot" in tool_names
-            assert len(tool_names) == 14
+            # Count is >= 14 to accommodate future additions (e.g. cross-agent-sync tools).
+            assert len(tool_names) >= 14
 
             # 3. Create a task (triggers lazy Store init)
             send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {

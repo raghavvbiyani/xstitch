@@ -1,24 +1,24 @@
 """CLI for Stitch — Agent Handoff & Context Protocol.
 
 Usage:
-    stitch global-setup [--dry-run]          One-time: detect & configure all AI tools on this machine
-    stitch auto-setup                        Per-project: idempotent bootstrap (init + inject + hooks)
-    stitch auto "<prompt>"                   Intelligent routing: detect intent, find/create task
-    stitch init                              Initialize Stitch in current project
+    stitch global-setup [--dry-run]        One-time: detect & configure all AI tools on this machine
+    stitch auto-setup                      Per-project: idempotent bootstrap (init + inject + hooks)
+    stitch auto "<prompt>"                 Intelligent routing: detect intent, find/create task
+    stitch init                            Initialize Stitch in current project
     stitch task new "title" [-o "objective"] Create a new task
     stitch task list [--all]                 List tasks (--all for global)
     stitch task show [task-id]               Show task details
     stitch task switch <task-id>             Switch active task
     stitch task update --state/--next/--blockers  Update task fields
-    stitch snap [-m "message"]               Take a snapshot
+    stitch snap [-m "message"]             Take a snapshot
     stitch decide -p "problem" -c "chosen" [-a "alt1,alt2"] [-t "tradeoffs"] [-r "reason"]
-    stitch handoff [task-id]                 Generate handoff bundle
-    stitch resume [task-id]                  Generate structured resume briefing
-    stitch smart-match "<query>"             BM25 relevance search across tasks
-    stitch search <query>                    Search tasks by keyword
-    stitch inject                            Inject into all agent config files (9 tools)
+    stitch handoff [task-id]               Generate handoff bundle
+    stitch resume [task-id]                Generate structured resume briefing
+    stitch smart-match "<query>"           BM25 relevance search across tasks
+    stitch search <query>                  Search tasks by keyword
+    stitch inject                          Inject into all agent config files (9 tools)
     stitch checkpoint -s "summary" [-d] [-e] [-f] [-q]  Rich pre-summarization checkpoint
-    stitch doctor [--fix]                    Diagnose installation and config health
+    stitch doctor [--fix]                  Diagnose installation and config health
     stitch hooks install                     Install git hooks for auto-snapshots
     stitch daemon start [--interval 300]     Start background auto-snapshot daemon
     stitch daemon stop                       Stop the daemon
@@ -40,13 +40,21 @@ from .capture import capture_snapshot, has_significant_changes
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="xstitch",
+        prog="stitch",
         description="Agent Handoff & Context Protocol — preserve AI context across tools",
     )
     sub = parser.add_subparsers(dest="command")
 
     # --- init ---
-    sub.add_parser("init", help="Initialize Stitch in current project")
+    init_p = sub.add_parser("init", help="Initialize Stitch in current project")
+    init_p.add_argument(
+        "--pin",
+        action="store_true",
+        help=(
+            "Drop a .ahcp sentinel file pinning this directory as the project root "
+            "(helps the resolver find non-git project roots)."
+        ),
+    )
 
     # --- task ---
     task_p = sub.add_parser("task", help="Task management")
@@ -157,8 +165,27 @@ def main():
 
     # --- doctor ---
     doc_p = sub.add_parser("doctor", help="Diagnose Stitch installation and configuration health")
-    doc_p.add_argument("--fix", action="store_true", help="Attempt to auto-fix issues")
+    doc_p.add_argument("--fix", action="store_true", help="Attempt to auto-fix installation issues")
     doc_p.add_argument("-v", "--verbose", action="store_true", help="Show all checks including passing ones")
+    doc_p.add_argument(
+        "--repair",
+        action="store_true",
+        help=(
+            "Scan for orphaned tasks (wrong project scope, e.g. from Cursor-MCP "
+            "cwd=home bug) and offer to re-home them. Use --dry-run to preview."
+        ),
+    )
+    doc_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --repair: show what would happen without moving anything",
+    )
+    doc_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="With --repair: skip interactive confirmation; auto-approve all moves",
+    )
 
     # --- launchd (reboot-safe) ---
     ld_p = sub.add_parser("launchd", help="macOS LaunchAgent (survives reboot)")
@@ -175,11 +202,54 @@ def main():
     cleanup_p.add_argument("--dry-run", action="store_true",
                            help="Show what would be removed without deleting")
 
+    # --- context-resolve (record user's conflict resolution) ---
+    cr_p = sub.add_parser("context-resolve", help="Record user's conflict resolution")
+    cr_p.add_argument("--conflict-id", required=True, help="Conflict ID from freshness report")
+    cr_p.add_argument("--resolution", required=True, help="User's resolution text")
+    cr_p.add_argument("task_id", nargs="?", help="Task ID (default: active)")
+    cr_p.add_argument("--id", dest="flag_id", help="Task ID (alternative to positional)")
+
+    # --- context-verify (check current context freshness) ---
+    cv_p = sub.add_parser("context-verify", help="Verify saved context against current reality")
+    cv_p.add_argument("task_id", nargs="?", help="Task ID (default: active)")
+    cv_p.add_argument("--id", dest="flag_id", help="Task ID (alternative to positional)")
+
     # --- hook-handler (called by Claude Code hooks, reads stdin) ---
     hh_p = sub.add_parser("hook-handler", help="Handle Claude Code hook events (reads JSON from stdin)")
     hh_p.add_argument("--event", required=True,
                        choices=["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
                        help="The hook event name")
+
+    # --- events (cross-agent activity feed) ---
+    ev_p = sub.add_parser(
+        "events",
+        help="Show cross-agent events (what other agents have added/changed)",
+    )
+    ev_p.add_argument("--since", help="ISO timestamp lower bound")
+    ev_p.add_argument("--agent", help="Agent id for the 'last seen' cursor (default: $AHCP_AGENT)")
+    ev_p.add_argument("--project", help="Filter to a specific project path (default: current)")
+    ev_p.add_argument("--all-projects", action="store_true", help="Don't filter by project")
+    ev_p.add_argument("--task", help="Filter to a specific task id")
+    ev_p.add_argument(
+        "--type",
+        action="append",
+        dest="event_types",
+        help="Event type filter (repeatable): task_created, snapshot_added, etc.",
+    )
+    ev_p.add_argument("--limit", type=int, default=100, help="Max events to return")
+    ev_p.add_argument(
+        "--mark-seen",
+        action="store_true",
+        help="Advance the agent's cursor to now after reading",
+    )
+
+    # --- mark-seen (advance last-seen cursor) ---
+    ms_p = sub.add_parser(
+        "mark-seen",
+        help="Advance this agent's cross-agent-sync cursor",
+    )
+    ms_p.add_argument("--agent", help="Agent id (default: $AHCP_AGENT)")
+    ms_p.add_argument("--ts", help="ISO timestamp to set the cursor at (default: now)")
 
     args = parser.parse_args()
 
@@ -191,7 +261,7 @@ def main():
 
     try:
         if args.command == "init":
-            _cmd_init(store)
+            _cmd_init(store, args)
         elif args.command == "task":
             _cmd_task(store, args)
         elif args.command == "snap":
@@ -226,8 +296,16 @@ def main():
             _cmd_launchd(args)
         elif args.command == "cleanup":
             _cmd_cleanup(args)
+        elif args.command == "context-resolve":
+            _cmd_context_resolve(store, args)
+        elif args.command == "context-verify":
+            _cmd_context_verify(store, args)
         elif args.command == "hook-handler":
             _cmd_hook_handler(store, args)
+        elif args.command == "events":
+            _cmd_events(store, args)
+        elif args.command == "mark-seen":
+            _cmd_mark_seen(args)
     except Exception as e:
         from . import log
         log.error(str(e))
@@ -260,9 +338,13 @@ def _resolve_task_id(store: Store, explicit_id: str | None) -> str:
 
 # --- Command implementations ---
 
-def _cmd_init(store: Store):
+def _cmd_init(store: Store, args=None):
     path = store.init_project()
     print(f"Initialized Stitch at {path}")
+    if args is not None and getattr(args, "pin", False):
+        from .project_resolver import write_ahcp_sentinel
+        sentinel = write_ahcp_sentinel(store.project_path)
+        print(f"Pinned project root: {sentinel}")
     print("Next: stitch task new \"your task title\" -o \"objective\"")
 
 
@@ -526,6 +608,128 @@ def _cmd_doctor(store: Store, args):
         print(f"  {result}")
         print("Re-run 'stitch doctor' to verify fixes.")
 
+    if getattr(args, "repair", False):
+        _run_repair(
+            dry_run=bool(getattr(args, "dry_run", False)),
+            auto_yes=bool(getattr(args, "yes", False)),
+        )
+
+
+def _run_repair(dry_run: bool, auto_yes: bool) -> None:
+    """Interactive orphan re-homing. Used by ``stitch doctor --repair``."""
+    from .repair import scan_orphans, repair_orphan
+
+    print()
+    print("Scanning for orphaned tasks...")
+    orphans = scan_orphans()
+    if not orphans:
+        print("  No orphans detected. Nothing to repair.")
+        return
+
+    print(f"  Found {len(orphans)} orphan(s).")
+    print()
+
+    moved = 0
+    skipped = 0
+    failed = 0
+    for o in orphans:
+        header = f"Task {o.task_id}  reason={o.reason}"
+        print("─" * len(header))
+        print(header)
+        print(f"  currently at : {o.current_scope_path}")
+        print(f"  meta says    : {o.meta_project_path}")
+        if o.suggested_project_path:
+            print(f"  suggested    : {o.suggested_project_path}")
+        target = o.suggested_project_path or o.meta_project_path
+        if not target:
+            print("  SKIP: no target project path available for repair")
+            skipped += 1
+            continue
+
+        if not auto_yes and not dry_run:
+            answer = input(f"  move to '{target}'? [y/N/s(kip)/q(uit)]: ").strip().lower()
+            if answer in ("q", "quit"):
+                print("Aborted by user.")
+                break
+            if answer not in ("y", "yes"):
+                print("  skipped")
+                skipped += 1
+                continue
+
+        result = repair_orphan(
+            task_id=o.task_id,
+            new_project_path=target,
+            dry_run=dry_run,
+            on_progress=lambda msg: print(f"  {msg}"),
+        )
+        if result.success:
+            moved += 1
+            print(f"  OK: {result.message}")
+        else:
+            failed += 1
+            print(f"  FAIL: {result.message}")
+
+    print()
+    print(f"Repair complete. moved={moved}  skipped={skipped}  failed={failed}")
+    if dry_run:
+        print("(dry-run: no files were modified)")
+
+
+def _cmd_events(store: Store, args):
+    """Show recent cross-agent events."""
+    import os
+    from . import event_log
+
+    agent = getattr(args, "agent", None) or os.environ.get("AHCP_AGENT") or "unknown"
+    since = getattr(args, "since", None)
+    if not since:
+        cur = event_log.get_cursor(agent)
+        if cur:
+            since = cur.get("ts")
+
+    project_filter = None
+    if not getattr(args, "all_projects", False):
+        project_filter = getattr(args, "project", None) or str(store.project_path)
+
+    filt = event_log.EventFilter(
+        since_ts=since,
+        project_path=project_filter,
+        task_id=getattr(args, "task", None) or None,
+        event_types=getattr(args, "event_types", None) or None,
+    )
+
+    events = event_log.read_events(filt=filt, limit=getattr(args, "limit", 100) or 100)
+
+    if getattr(args, "mark_seen", False):
+        event_log.set_cursor(agent)
+
+    if not events:
+        scope = "all projects" if getattr(args, "all_projects", False) else f"project {project_filter}"
+        print(f"No events since {since or 'forever'} for {scope}.")
+        return
+
+    print(f"{len(events)} event(s):")
+    for ev in events:
+        ts = ev.get("ts", "?")
+        et = ev.get("event_type", "?")
+        tid = (ev.get("task_id") or "?")[:12]
+        ag = ev.get("agent", "?")
+        meta = ev.get("meta") or {}
+        preview = meta.get("title") or meta.get("message_preview") or meta.get("problem_preview") or ""
+        if preview:
+            preview = f" — {preview[:80]}"
+        print(f"  [{ts}] {et}  task={tid}  agent={ag}{preview}")
+
+
+def _cmd_mark_seen(args):
+    """Advance the agent's 'last seen' cursor."""
+    import os
+    from . import event_log
+    agent = getattr(args, "agent", None) or os.environ.get("AHCP_AGENT") or "unknown"
+    ts = getattr(args, "ts", None)
+    data = event_log.set_cursor(agent, ts=ts)
+    print(f"Cursor for '{agent}' set to {data.get('ts')}.")
+
 
 def _cmd_launchd(args):
     from .launchd import install_launchd, uninstall_launchd, launchd_status
@@ -555,7 +759,7 @@ def _cmd_cleanup(args):
     print()
 
     if not PROJECTS_HOME.exists():
-        print("No projects found at ~/.stitch/projects/")
+        print(f"No projects found at {PROJECTS_HOME}")
         return
 
     removed = 0
@@ -639,15 +843,49 @@ def _cmd_cleanup(args):
             print("Global registry pruned.")
 
 
+def _cmd_context_resolve(store: Store, args):
+    """Record a user's conflict resolution as a special snapshot."""
+    from . import log
+    from .capture import capture_snapshot
+    task_id = _resolve_task_id(store, _effective_task_id(args))
+    conflict_id = args.conflict_id
+    resolution = args.resolution
+
+    snap = capture_snapshot(
+        message=f"Conflict resolved [{conflict_id}]: {resolution}",
+        source="conflict-resolution",
+        cwd=str(store.project_path),
+        task_id=task_id,
+    )
+    rejection = store.add_snapshot(task_id, snap)
+    if rejection:
+        log.skipped("Resolution", rejection)
+        return
+    store.update_context_file(task_id)
+    log.saved("Conflict resolution", f"[{conflict_id}] {resolution[:80]}")
+
+
+def _cmd_context_verify(store: Store, args):
+    """Check saved context freshness and conflicts against current reality."""
+    from .context_sync import ContextSyncEngine
+    task_id = _resolve_task_id(store, _effective_task_id(args))
+    task = store.get_task(task_id)
+    if not task:
+        print(f"Task {task_id} not found.")
+        return
+    snapshots = store.get_snapshots(task_id, limit=20)
+    v = ContextSyncEngine.verify(task, store, snapshots)
+    print(ContextSyncEngine.format_freshness_report(v))
+
+
 # ─── Session state helpers ────────────────────────────────────────────────────
-# Session state is stored at ~/.stitch/session_state.json.
+# Session state is stored at ~/.ahcp/session_state.json.
 # It tracks per-session tool activity so we can auto-snapshot every N
 # significant tool calls without any agent cooperation.
 
-import re as _re
 from pathlib import Path as _Path
 
-_SESSION_STATE_FILE = _Path.home() / ".stitch" / "session_state.json"
+_SESSION_STATE_FILE = _Path.home() / ".ahcp" / "session_state.json"
 _SIGNIFICANT_TOOLS = {"Bash", "Edit", "Write", "NotebookEdit"}
 _SNAP_EVERY_N_TOOLS = 3       # snapshot every 3 significant tool calls
 _SNAP_EVERY_SECONDS = 180     # OR every 3 minutes, whichever comes first
@@ -673,8 +911,12 @@ def _save_session_state(state: dict) -> None:
         pass  # Never crash the hook
 
 
+import re as _re
+
 # ── Semantic command patterns ──────────────────────────────────────────────
+# Order matters: more specific patterns first.
 _BASH_PATTERNS = [
+    # Build / test / run
     (_re.compile(r'mvn\s+([\w:]+)'),            lambda m: f"Maven {m.group(1)}"),
     (_re.compile(r'gradle\s+([\w:]+)'),          lambda m: f"Gradle {m.group(1)}"),
     (_re.compile(r'cargo\s+(\w+)'),              lambda m: f"Cargo {m.group(1)}"),
@@ -686,19 +928,23 @@ _BASH_PATTERNS = [
     (_re.compile(r'python3?\s+-m\s+pytest'),     lambda m: "pytest"),
     (_re.compile(r'python3?\s+-m\s+([\w.]+)'),   lambda m: f"python -m {m.group(1)}"),
     (_re.compile(r'python3?\s+([\w./]+\.py)'),   lambda m: f"python {_Path(m.group(1)).name}"),
+    # Package management
     (_re.compile(r'pip3?\s+install'),            lambda m: "pip install"),
     (_re.compile(r'pip3?\s+uninstall'),          lambda m: "pip uninstall"),
     (_re.compile(r'brew\s+(\w+)'),               lambda m: f"brew {m.group(1)}"),
     (_re.compile(r'apt(-get)?\s+(\w+)'),         lambda m: f"apt {m.group(2)}"),
+    # Git
     (_re.compile(r'git\s+commit'),               lambda m: "git commit"),
     (_re.compile(r'git\s+push'),                 lambda m: "git push"),
     (_re.compile(r'git\s+pull'),                 lambda m: "git pull"),
     (_re.compile(r'git\s+checkout'),             lambda m: "git checkout"),
     (_re.compile(r'git\s+merge'),                lambda m: "git merge"),
     (_re.compile(r'git\s+rebase'),               lambda m: "git rebase"),
+    # Docker / infra
     (_re.compile(r'docker\s+(\w+)'),             lambda m: f"docker {m.group(1)}"),
     (_re.compile(r'kubectl\s+(\w+)'),            lambda m: f"kubectl {m.group(1)}"),
     (_re.compile(r'terraform\s+(\w+)'),          lambda m: f"terraform {m.group(1)}"),
+    # File ops
     (_re.compile(r'unzip\s+'),                   lambda m: "unzip"),
     (_re.compile(r'tar\s+'),                     lambda m: "tar"),
     (_re.compile(r'curl\s+'),                    lambda m: "curl"),
@@ -707,11 +953,13 @@ _BASH_PATTERNS = [
 
 
 def _semantic_bash(cmd: str) -> str:
+    """Map a shell command to a readable semantic label."""
     cmd_stripped = cmd.strip()
     for pattern, formatter in _BASH_PATTERNS:
         m = pattern.search(cmd_stripped)
         if m:
             return formatter(m)
+    # Fallback: first two tokens of command (verb + noun)
     tokens = cmd_stripped.split()
     if len(tokens) >= 2:
         return f"{tokens[0]} {tokens[1][:30]}"
@@ -719,55 +967,85 @@ def _semantic_bash(cmd: str) -> str:
 
 
 def _extract_outcome(tool_response: dict | None) -> str:
+    """Extract a short outcome string from a tool_response dict.
+
+    Returns "→ SUCCESS", "→ exit:N (hint)", "→ FAILED: ...", or "".
+    Designed to be defensive — never crashes, never returns long strings.
+    """
     if not tool_response or not isinstance(tool_response, dict):
         return ""
     try:
+        # exit_code is the most reliable signal
         exit_code = tool_response.get("exit_code")
         if exit_code is None:
             exit_code = tool_response.get("returncode")
+
         output = str(tool_response.get("output", "") or tool_response.get("content", "") or "")
         error = str(tool_response.get("error", "") or tool_response.get("stderr", "") or "")
         combined = (output + " " + error).lower()
+
+        # Positive signals
         if any(x in combined for x in ["build success", "tests passed", "all tests"]):
             if "build success" in combined:
+                # Extract test count if present
                 m = _re.search(r'(\d+)\s+test', combined)
                 if m:
                     return f" → BUILD SUCCESS ({m.group(1)} tests)"
             return " → SUCCESS"
+
+        # Negative signals
         if exit_code is not None and exit_code != 0:
+            # Try to extract first error line
             for line in (output + "\n" + error).split("\n"):
                 line = line.strip()
                 if line and any(x in line.lower() for x in ["error", "exception", "fail", "not found"]):
                     return f" → exit:{exit_code} ({line[:50]})"
             return f" → exit:{exit_code}"
+
         if exit_code == 0:
             return " → OK"
+
+        # No exit code: look for error keywords
         if any(x in combined for x in ["error", "exception", "traceback", "failed"]):
             for line in (output + "\n" + error).split("\n"):
                 line = line.strip()
                 if line and "error" in line.lower():
                     return f" → FAILED: {line[:50]}"
             return " → FAILED"
+
         return ""
     except Exception:
         return ""
 
 
 def _describe_tool(tool_name: str, tool_input: dict, tool_response: dict | None = None) -> str:
+    """Build a semantic, outcome-oriented description of a tool call.
+
+    Examples:
+      Bash(mvn compile)     → "Maven compile → SUCCESS"
+      Bash(pytest)          → "pytest → 13 tests passing"
+      Edit(service.py)      → "Edited service.py"
+      Write(dao.py)         → "Wrote dao.py"
+    """
     outcome = _extract_outcome(tool_response)
+
     if tool_name == "Bash":
         cmd = str(tool_input.get("command", "")).strip().replace("\n", " ")
         label = _semantic_bash(cmd)
         return f"{label}{outcome}"
+
     if tool_name == "Edit":
         fp = _Path(str(tool_input.get("file_path", ""))).name
         return f"Edited {fp}{outcome}" if fp else f"Edit{outcome}"
+
     if tool_name == "Write":
         fp = _Path(str(tool_input.get("file_path", ""))).name
         return f"Wrote {fp}{outcome}" if fp else f"Write{outcome}"
+
     if tool_name == "NotebookEdit":
         fp = _Path(str(tool_input.get("notebook_path", ""))).name
         return f"NotebookEdit {fp}{outcome}" if fp else f"NotebookEdit{outcome}"
+
     return f"{tool_name}{outcome}"
 
 
@@ -798,6 +1076,9 @@ def _append_session_continuity(context_msg: str, current_session_id: str) -> str
        previous turn(s) already did — crucial for multi-turn workflows.
     2. RESUMED SESSION (Stop was recent, < 30 min): user reopened Claude Code
        and starts working again. Shows what the prior session accomplished.
+
+    This prevents agents from redoing work, ignoring prior failures, or losing
+    context when the user switches focus mid-session.
     """
     try:
         state = _load_session_state()
@@ -840,7 +1121,7 @@ def _append_session_continuity(context_msg: str, current_session_id: str) -> str
 
         return context_msg
     except Exception:
-        return context_msg
+        return context_msg  # Never crash the hook
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -889,6 +1170,7 @@ def _cmd_hook_handler(store: Store, args):
         if system_msg:
             hook_output["systemMessage"] = system_msg
         if context_msg:
+            # Append session continuity context if there was recent activity
             context_msg = _append_session_continuity(context_msg, session_id)
             hook_output["hookSpecificOutput"] = {
                 "hookEventName": "UserPromptSubmit",
@@ -903,6 +1185,7 @@ def _cmd_hook_handler(store: Store, args):
         state["session_id"] = session_id
         state["last_prompt"] = prompt[:200]
         state["prompt_time"] = _now_iso_local()
+        # Reset tool counters for new session (new UserPromptSubmit = new turn)
         if state.get("session_id_prev") != session_id:
             state["sig_tool_count"] = 0
             state["last_snap_tool_count"] = 0
@@ -914,13 +1197,13 @@ def _cmd_hook_handler(store: Store, args):
     elif event == "PostToolUse":
         tool_name = stdin_data.get("tool_name", "")
         if tool_name not in _SIGNIFICANT_TOOLS:
-            return
+            return  # Only track significant tool calls
 
         tool_input = stdin_data.get("tool_input", {})
-        tool_response = stdin_data.get("tool_response", {})
 
         state = _load_session_state()
 
+        # Reset if this is a brand-new session_id we've never seen
         if session_id and state.get("session_id") != session_id:
             state = {
                 "session_id": session_id,
@@ -931,12 +1214,15 @@ def _cmd_hook_handler(store: Store, args):
                 "recent_tools": [],
             }
 
+        # Track the tool call with semantic description
+        tool_response = stdin_data.get("tool_response", {})
         state["sig_tool_count"] = state.get("sig_tool_count", 0) + 1
         tool_desc = _describe_tool(tool_name, tool_input, tool_response)
         recent = state.get("recent_tools", [])
         recent.append(tool_desc)
-        state["recent_tools"] = recent[-15:]
+        state["recent_tools"] = recent[-15:]  # Keep last 15
 
+        # Decide whether to auto-snapshot
         tools_since_snap = state["sig_tool_count"] - state.get("last_snap_tool_count", 0)
         last_snap_time = state.get("last_snap_time", "")
         has_prior_snap = bool(last_snap_time)
@@ -950,6 +1236,7 @@ def _cmd_hook_handler(store: Store, args):
         if should_snap:
             active = store.get_active_task_id()
             if active:
+                # Build a semantic message from what happened since last snap
                 snap_tools = state["recent_tools"][-(tools_since_snap):]
                 if len(snap_tools) == 1:
                     msg = f"Progress: {snap_tools[0]}"
@@ -977,7 +1264,8 @@ def _cmd_hook_handler(store: Store, args):
         _save_session_state(state)
 
     elif event == "PreToolUse":
-        pass  # Lightweight: just track timing. We don't block tools.
+        # Lightweight: no output, just track timing. We don't block tools.
+        pass
 
     elif event == "Stop":
         active = store.get_active_task_id()
@@ -986,6 +1274,7 @@ def _cmd_hook_handler(store: Store, args):
         if active:
             from .capture import capture_snapshot
 
+            # Build a rich stop snapshot using session state
             total = state.get("sig_tool_count", 0) if state.get("session_id") == session_id else 0
             recent = state.get("recent_tools", []) if total > 0 else []
 
@@ -1009,6 +1298,10 @@ def _cmd_hook_handler(store: Store, args):
                 store.update_context_file(active)
                 log.saved("Snapshot", msg[:80])
 
+            # Auto-update task.current_state only if it's empty/unset.
+            # This helps the next agent's resume briefing show where things stand.
+            # We only do this when current_state is blank so we don't overwrite
+            # agent-written state (which is always more authoritative).
             if total > 0:
                 task = store.get_task(active)
                 if task and not task.current_state.strip():
@@ -1019,6 +1312,7 @@ def _cmd_hook_handler(store: Store, args):
                     store.update_task(task)
                     store.update_context_file(active)
 
+        # Always record stop time for session continuity detection
         state["stop_time"] = _now_iso_local()
         state["stop_session_id"] = session_id
         _save_session_state(state)
@@ -1028,11 +1322,22 @@ def _build_hook_messages(result: dict, full_response: str) -> tuple[str, str]:
     """Build systemMessage (shown to user) and additionalContext (injected for agent)."""
     action = result.get("action")
     task = result.get("task")
+    verification = result.get("verification")
+
+    sync_header = ""
+    if verification:
+        from .context_sync import ContextSyncEngine
+        sync_header = ContextSyncEngine.format_sync_protocol(verification) + "\n"
 
     if action == "resumed" and task:
         conf = result.get("confidence", 0)
+        conflict_note = ""
+        if verification and verification.needs_user_input:
+            n = len(verification.needs_user_input)
+            conflict_note = f" ({n} conflict{'s' if n != 1 else ''} need your input)"
         return (
-            f"[Stitch] Resumed task: '{task.title}' ({conf:.0%} match). Context loaded from previous session.",
+            f"[Stitch] Resumed task: '{task.title}' ({conf:.0%} match). Context loaded from previous session.{conflict_note}",
+            f"{sync_header}"
             f"Stitch CONTEXT (you MUST follow this):\n"
             f"Active task: {task.id} — {task.title}\n"
             f"You MUST push snapshots (stitch_snapshot) after completing sub-tasks and decisions (stitch_add_decision) for architectural choices.\n"
@@ -1049,10 +1354,28 @@ def _build_hook_messages(result: dict, full_response: str) -> tuple[str, str]:
             f"{full_response}",
         )
     elif action == "loaded_active" and task:
+        conflict_note = ""
+        if verification and verification.needs_user_input:
+            n = len(verification.needs_user_input)
+            conflict_note = f" ({n} conflict{'s' if n != 1 else ''} need your input)"
         return (
-            f"[Stitch] Active task: '{task.title}'. Context loaded from previous session.",
+            f"[Stitch] Active task: '{task.title}'. Context loaded from previous session.{conflict_note}",
+            f"{sync_header}"
             f"Stitch CONTEXT (you MUST follow this):\n"
             f"Active task: {task.id} — {task.title}\n"
+            f"You MUST push snapshots (stitch_snapshot) after completing sub-tasks and decisions (stitch_add_decision) for architectural choices.\n"
+            f"Push every 2-3 minutes of active work.\n\n"
+            f"{full_response}",
+        )
+    elif action == "resumed_cross_project" and task:
+        other = result.get("other_project", "unknown")
+        conf = result.get("confidence", 0)
+        return (
+            f"[Stitch] Loaded cross-project context: '{task.title}' from {other} ({conf:.0%} match).",
+            f"{sync_header}"
+            f"Stitch CONTEXT (you MUST follow this):\n"
+            f"Active task: {task.id} — {task.title}\n"
+            f"Context loaded from project: {other}\n"
             f"You MUST push snapshots (stitch_snapshot) after completing sub-tasks and decisions (stitch_add_decision) for architectural choices.\n"
             f"Push every 2-3 minutes of active work.\n\n"
             f"{full_response}",

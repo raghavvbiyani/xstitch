@@ -283,7 +283,13 @@ class TaskDocument:
     total_tokens: int = 0
 
     def build(self, store: Store):
-        """Populate all fields from the task's stored data."""
+        """Populate all fields from the task's stored data.
+
+        Cross-project aware: when the task lives in another project scope,
+        we read decisions/snapshots from the owning project's Store so
+        deep-field signals are not silently empty (which would otherwise
+        tank BM25 scores for cross-project tasks).
+        """
         t = self.task
         self.fields = {
             "title": t.title,
@@ -294,7 +300,8 @@ class TaskDocument:
             "blockers": t.blockers,
         }
 
-        decisions = store.get_decisions(t.id)
+        owner_store = store.for_task(t.id) or store
+        decisions = owner_store.get_decisions(t.id)
         self.fields["decisions_problem"] = " ".join(d.problem for d in decisions)
         self.fields["decisions_chosen"] = " ".join(d.chosen for d in decisions)
         self.fields["decisions_alternatives"] = " ".join(
@@ -304,7 +311,7 @@ class TaskDocument:
             f"{d.tradeoffs} {d.reasoning}" for d in decisions
         )
 
-        snapshots = store.get_snapshots(t.id, limit=20)
+        snapshots = owner_store.get_snapshots(t.id, limit=20)
         self.fields["snapshots"] = " ".join(s.message for s in snapshots)
         self.fields["files_changed"] = " ".join(
             " ".join(s.files_changed) for s in snapshots
@@ -738,7 +745,7 @@ def generate_resume_briefing(task_id: str, store: Store) -> str:
 # ---------------------------------------------------------------------------
 
 def _check_stitch_project_data(entry: Path, query_tokens: list[str]) -> tuple[float, list[str]]:
-    """Check ~/.stitch/projects/ for task data belonging to a workspace entry."""
+    """Check ~/.ahcp/projects/ for task data belonging to a workspace entry."""
     from .store import PROJECTS_HOME, project_key
     score = 0.0
     evidence = []
@@ -766,7 +773,7 @@ def _check_stitch_project_data(entry: Path, query_tokens: list[str]) -> tuple[fl
                 pass
 
     # Backward compat: also check old in-repo .stitch/
-    old_stitch = entry / ".stitch"
+    old_stitch = entry / ".ahcp"
     if old_stitch.is_dir() and score == 0:
         score += 2.0
         evidence.append("has_stitch_legacy")
@@ -797,7 +804,7 @@ def scan_workspace_for_context(
     Looks at project directories under the workspace root to find
     repos that might be related to a query (by checking directory names,
     README files, and recent git log messages).
-    Checks ~/.stitch/projects/ for task data (new layout) and falls back
+    Checks ~/.ahcp/projects/ for task data (new layout) and falls back
     to in-repo .stitch/ (legacy layout).
     """
     root = Path(workspace_root)

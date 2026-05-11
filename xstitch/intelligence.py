@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,38 @@ RESUME_SIGNALS = {
     "same task", "that task", "the task", "unfinished", "pending",
     "follow up", "followup", "follow-up",
 }
+
+# ── Match-acceptance thresholds for auto_route ───────────────────────────────
+#
+# Two separate gates exist:
+#   1. BM25 confidence — how well the query matches the task's indexed fields.
+#   2. Title-token Jaccard overlap — how much of the user's prompt literally
+#      overlaps with the task's title. This is a cheap, high-precision guard
+#      against BM25 keyword collisions where a new prompt shares domain
+#      vocabulary with an unrelated task (e.g. prompts in repo A that
+#      mention "brazil / buson / clickbus" accidentally matching a Flixbus
+#      early-reservation task in repo B that also mentions those terms).
+#
+# Local matches use a gentler overlap floor than cross-project matches
+# because same-project paraphrases are common; we want to reject pure
+# BM25 noise (zero / near-zero literal overlap) without penalising
+# legitimate continuations.
+# Cross-project matches must clear stricter gates because silently cloning
+# a task from another project is a high-cost false positive (it litters
+# ~/.ahcp/projects/<other>/ with misrouted tasks and misleads the agent).
+LOCAL_CONFIDENCE_THRESHOLD = 0.65
+LOCAL_TITLE_OVERLAP_MIN = 0.10
+CROSS_PROJECT_CONFIDENCE_THRESHOLD = 0.55
+CROSS_PROJECT_TITLE_OVERLAP_MIN = 0.30
+# Explicit-resume fallback: when the user literally said "resume/continue",
+# loading *some* context is better than none, so we keep the historical
+# 0.40 bar for the top match.
+RESUME_INTENT_MIN_CONFIDENCE = 0.40
+# Active-task fallback (loaded_active path in _handle_resume) requires the
+# user's prompt to share at least this much vocabulary with the active task.
+# Without this gate, "continue oncall investigation" while the active task
+# is "Debug BCR drop in Brazil" silently injects an unrelated briefing.
+ACTIVE_TASK_FALLBACK_OVERLAP_MIN = 0.10
 
 NEW_SIGNALS = {
     "new task", "start fresh", "from scratch", "brand new", "create",
@@ -133,42 +166,56 @@ def auto_setup(project_path: str | None = None, quiet: bool = False) -> dict:
         if not quiet:
             log.ok(f"Initialized project storage at {stitch_dir}")
 
-    from .discovery import (
-        inject_agent_discovery, Stitch_SECTION_MARKER, _update_gitignore,
-        INJECTION_TARGETS, _get_installed_tool_names,
-    )
-    installed = _get_installed_tool_names()
-    project = Path(store.project_path)
-    needs_inject = False
-    for target in INJECTION_TARGETS:
-        if target["tool_key"] not in installed:
-            continue
-        f = project / target["file"]
-        if target["content"] == "mdc":
-            if not f.exists():
-                needs_inject = True
-                break
-        else:
-            if not f.exists() or Stitch_SECTION_MARKER not in f.read_text():
-                needs_inject = True
-                break
+    try:
+        from .discovery import (
+            inject_agent_discovery, Stitch_SECTION_MARKER, _update_gitignore,
+            INJECTION_TARGETS, _get_installed_tool_names,
+        )
+        installed = _get_installed_tool_names()
+        project = Path(store.project_path)
+        needs_inject = False
+        for target in INJECTION_TARGETS:
+            if target["tool_key"] not in installed:
+                continue
+            f = project / target["file"]
+            try:
+                if target["content"] == "mdc":
+                    if not f.exists():
+                        needs_inject = True
+                        break
+                else:
+                    if not f.exists() or Stitch_SECTION_MARKER not in f.read_text():
+                        needs_inject = True
+                        break
+            except OSError:
+                pass
 
-    if needs_inject:
-        inject_agent_discovery(str(store.project_path))
-        result["actions"].append("injected agent discovery")
-        if not quiet:
-            log.ok("Injected Stitch instructions into agent config files")
-    else:
-        _update_gitignore(project)
-
-    if is_git_repo(str(store.project_path)):
-        from .hooks import install_hooks, HOOK_MARKER
-        git_dir = Path(store.project_path) / ".git" / "hooks" / "post-commit"
-        if not git_dir.exists() or HOOK_MARKER not in git_dir.read_text():
-            install_hooks(str(store.project_path))
-            result["actions"].append("installed git hooks")
+        if needs_inject:
+            inject_agent_discovery(str(store.project_path))
+            result["actions"].append("injected agent discovery")
             if not quiet:
-                log.ok("Installed git post-commit hook")
+                log.ok("Injected Stitch instructions into agent config files")
+        else:
+            try:
+                _update_gitignore(project)
+            except OSError:
+                pass
+    except OSError:
+        if not quiet:
+            log.info("Skipped file injection (project directory may be read-only)")
+
+    try:
+        if is_git_repo(str(store.project_path)):
+            from .hooks import install_hooks, HOOK_MARKER
+            git_dir = Path(store.project_path) / ".git" / "hooks" / "post-commit"
+            if not git_dir.exists() or HOOK_MARKER not in git_dir.read_text():
+                install_hooks(str(store.project_path))
+                result["actions"].append("installed git hooks")
+                if not quiet:
+                    log.ok("Installed git post-commit hook")
+    except OSError:
+        if not quiet:
+            log.info("Skipped git hooks (directory may be read-only)")
 
     active = store.get_active_task_id()
     result["active_task_id"] = active
@@ -282,16 +329,36 @@ def auto_route(user_prompt: str, store: Store) -> dict:
         title = _extract_task_title(user_prompt)
         tags = _extract_intent_tags(user_prompt)
         objective = _build_enriched_objective(user_prompt)
-        task = store.create_task(title=title, objective=objective, tags=tags)
-        result["action"] = "created"
-        result["task"] = task
+        existing = _find_recent_duplicate(store, title)
+        if existing:
+            result["action"] = "resumed"
+            result["task"] = existing
+            result["briefing"] = ""
+        else:
+            task = store.create_task(title=title, objective=objective, tags=tags)
+            result["action"] = "created"
+            result["task"] = task
 
     else:  # ambiguous — relevance is the ONLY gate
         matches = smart_match(user_prompt, store)
-        if matches and matches[0]["confidence"] >= 0.65:
-            result = _handle_resume(user_prompt, store, result)
+        if matches:
+            best = matches[0]
+            best_is_local = store.task_is_local(best["task"].id)
+            match_ok = _match_accepted(user_prompt, best, is_local=best_is_local)
+            if match_ok:
+                result = _handle_resume(user_prompt, store, result)
+            elif _is_conversational(user_prompt):
+                active_id = store.get_active_task_id()
+                if active_id:
+                    task = store.get_task(active_id)
+                    if task:
+                        result["action"] = "active_task_exists"
+                        result["task"] = task
+                if result["action"] is None:
+                    result["action"] = "greeting"
+            else:
+                result = _create_or_dedup(user_prompt, store, result)
         elif _is_conversational(user_prompt):
-            # Greeting/filler — don't create a task for "hi claude"
             active_id = store.get_active_task_id()
             if active_id:
                 task = store.get_task(active_id)
@@ -301,21 +368,34 @@ def auto_route(user_prompt: str, store: Store) -> dict:
             if result["action"] is None:
                 result["action"] = "greeting"
         else:
-            # Actionable prompt with no relevance match.
-            # ALWAYS create a new task so the session's work gets tracked,
-            # regardless of whether a stale active task exists.
-            title = _extract_task_title(user_prompt)
-            tags = _extract_intent_tags(user_prompt)
-            objective = _build_enriched_objective(user_prompt)
-            task = store.create_task(title=title, objective=objective, tags=tags)
-            result["action"] = "created"
-            result["task"] = task
+            result = _create_or_dedup(user_prompt, store, result)
 
     return result
 
 
+def _create_or_dedup(user_prompt: str, store: Store, result: dict) -> dict:
+    """Create a new task, but first check for a recent duplicate (race condition guard)."""
+    title = _extract_task_title(user_prompt)
+    existing = _find_recent_duplicate(store, title)
+    if existing:
+        store.switch_task(existing.id)
+        result["action"] = "resumed"
+        result["task"] = existing
+        result["briefing"] = ""
+        return result
+
+    tags = _extract_intent_tags(user_prompt)
+    objective = _build_enriched_objective(user_prompt)
+    task = store.create_task(title=title, objective=objective, tags=tags)
+    result["action"] = "created"
+    result["task"] = task
+    return result
+
+
 def _handle_resume(user_prompt: str, store: Store, result: dict) -> dict:
-    """Handle a resume intent: search, verify, brief."""
+    """Handle a resume intent: search, verify, brief, and sync context."""
+    from .context_sync import ContextSyncEngine
+
     matches = smart_match(user_prompt, store)
 
     query_tokens = _tokenize(user_prompt)
@@ -325,29 +405,81 @@ def _handle_resume(user_prompt: str, store: Store, result: dict) -> dict:
         workspace_hints = scan_workspace_for_context(ws_root, query_tokens)
     result["workspace_hints"] = workspace_hints
 
-    if matches and matches[0]["confidence"] >= 0.4:
+    if matches and matches[0]["confidence"] >= RESUME_INTENT_MIN_CONFIDENCE:
+        best = matches[0]
+        task = best["task"]
+        # Apply the same overlap-gated acceptance check used by the
+        # ambiguous branch. Two failure modes this guards against:
+        #  1. Cross-project keyword collisions silently cloning a foreign
+        #     task into the current project (e.g. domain vocabulary like
+        #     "brazil/buson/clickbus" colliding across repos).
+        #  2. Local matches with high BM25 confidence but zero literal
+        #     overlap — long objectives full of common stems can score
+        #     0.7+ against an unrelated prompt and inject the wrong
+        #     briefing.
+        # We use the title-overlap gate even on explicit-resume intent
+        # because loading the WRONG context is worse than loading no
+        # context: it actively misleads the agent.
+        is_local = store.task_is_local(task.id)
+        if not _match_accepted(user_prompt, best, is_local=is_local):
+            matches = []  # treat as no match → fall through to active-task fallback
+
+    if matches and matches[0]["confidence"] >= RESUME_INTENT_MIN_CONFIDENCE:
         best = matches[0]
         task = best["task"]
 
-        # Validate the task is accessible from the current project
         if store.task_is_local(task.id):
             store.switch_task(task.id)
+            task.bump_session()
+            store.update_task(task)
+
+            snapshots = store.get_snapshots(task.id, limit=20)
+            verification = ContextSyncEngine.verify(task, store, snapshots)
             briefing = generate_resume_briefing(task.id, store)
+            briefing = _prepend_freshness_report(briefing, verification)
+
             result["action"] = "resumed"
             result["task"] = task
             result["briefing"] = briefing
+            result["verification"] = verification
             result["confidence"] = best["confidence"]
             result["evidence"] = best["evidence"]
             result["matches"] = matches[:5]
         else:
-            # Task exists in a different project
-            other_project = task.project_path or store.get_task_project_path(task.id)
-            result["action"] = "found_in_other_project"
-            result["task"] = task
-            result["confidence"] = best["confidence"]
-            result["evidence"] = best["evidence"]
-            result["other_project"] = other_project
-            result["matches"] = matches[:5]
+            # Cross-project match. Check if we already cloned this task locally
+            # (dedup guard against repeated cross-project cloning).
+            existing_local = _find_recent_duplicate(store, task.title, seconds=86400)
+            if existing_local:
+                store.switch_task(existing_local.id)
+                existing_local.bump_session()
+                store.update_task(existing_local)
+                briefing = generate_resume_briefing(existing_local.id, store)
+                result["action"] = "resumed"
+                result["task"] = existing_local
+                result["briefing"] = briefing
+                result["confidence"] = best["confidence"]
+                result["evidence"] = best["evidence"]
+                result["matches"] = matches[:5]
+            else:
+                other_project = task.project_path or store.get_task_project_path(task.id)
+                briefing = generate_resume_briefing(task.id, store)
+
+                local_task = store.create_task(
+                    title=task.title,
+                    objective=f"[Continued from {other_project}] {task.objective}",
+                    tags=list(task.tags),
+                )
+                local_task.bump_session()
+                store.update_task(local_task)
+
+                result["action"] = "resumed_cross_project"
+                result["task"] = local_task
+                result["briefing"] = briefing
+                result["source_task"] = task
+                result["other_project"] = other_project
+                result["confidence"] = best["confidence"]
+                result["evidence"] = best["evidence"]
+                result["matches"] = matches[:5]
 
     elif matches:
         result["action"] = "show_matches"
@@ -358,14 +490,158 @@ def _handle_resume(user_prompt: str, store: Store, result: dict) -> dict:
         if active_id:
             task = store.get_task(active_id)
             if task:
-                briefing = generate_resume_briefing(active_id, store)
-                result["action"] = "loaded_active"
-                result["task"] = task
-                result["briefing"] = briefing
+                # Gate the active-task fallback by relevance. If the user
+                # said "resume/continue" but the active task has nothing
+                # to do with their prompt, blindly injecting the active
+                # task's briefing is exactly the wrong-context-injection
+                # bug we are guarding against everywhere else. Treat
+                # zero-overlap active tasks the same way the ambiguous
+                # branch treats them: surface the task pointer without
+                # the briefing.
+                overlap = _prompt_title_overlap(user_prompt, task)
+                if overlap >= ACTIVE_TASK_FALLBACK_OVERLAP_MIN:
+                    task.bump_session()
+                    store.update_task(task)
+
+                    snapshots = store.get_snapshots(active_id, limit=20)
+                    verification = ContextSyncEngine.verify(task, store, snapshots)
+                    briefing = generate_resume_briefing(active_id, store)
+                    briefing = _prepend_freshness_report(briefing, verification)
+
+                    result["action"] = "loaded_active"
+                    result["task"] = task
+                    result["briefing"] = briefing
+                    result["verification"] = verification
+                else:
+                    result["action"] = "active_task_exists"
+                    result["task"] = task
         else:
             result["action"] = "no_match"
 
     return result
+
+
+def _prepend_freshness_report(briefing: str, verification) -> str:
+    """Insert the Context Freshness Report at the top of the briefing."""
+    from .context_sync import ContextSyncEngine
+    report = ContextSyncEngine.format_freshness_report(verification)
+    header_end = briefing.find("\n\n")
+    if header_end > 0:
+        return briefing[:header_end + 2] + report + "\n" + briefing[header_end + 2:]
+    return report + "\n" + briefing
+
+
+def _find_recent_duplicate(store: Store, title: str, seconds: int = 120) -> Task | None:
+    """Guard against the cross-tool race condition.
+
+    If another tool JUST created a task with a very similar title (within
+    the time window), return it so we resume instead of creating a duplicate.
+    """
+    now = datetime.now(timezone.utc)
+    for task in store.list_tasks(project_only=True):
+        try:
+            created = datetime.fromisoformat(task.created_at)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = (now - created).total_seconds()
+        except (ValueError, TypeError):
+            continue
+        if age <= seconds and _title_similarity(task.title, title) > 0.6:
+            return task
+    return None
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Jaccard similarity on lowercased word sets."""
+    wa = set(a.lower().split())
+    wb = set(b.lower().split())
+    if not wa or not wb:
+        return 0.0
+    intersection = wa & wb
+    union = wa | wb
+    return len(intersection) / len(union)
+
+
+def _prompt_title_overlap(user_prompt: str, task: Task) -> float:
+    """Jaccard overlap between normalised tokens of the prompt and the task title.
+
+    Uses the same `_tokenize` as the BM25 engine so that the gate stays
+    consistent with the relevance scorer (stop-words dropped, stems applied).
+    Rare-term overlap dominates because stop-words are already removed in
+    `_tokenize`; this is the intent.
+
+    Returns a value in [0.0, 1.0]. Empty token sets return 0.0 rather than
+    dividing by zero — callers should treat 0.0 as "no overlap".
+    """
+    prompt_tokens = set(_tokenize(user_prompt))
+    title_tokens = set(_tokenize(task.title or ""))
+    if not prompt_tokens or not title_tokens:
+        return 0.0
+    intersection = prompt_tokens & title_tokens
+    union = prompt_tokens | title_tokens
+    return len(intersection) / len(union)
+
+
+def _cross_project_match_accepted(user_prompt: str, match: dict) -> bool:
+    """Decide whether a cross-project BM25 match is strong enough to clone.
+
+    Cross-project cloning is a heavy side-effect: it creates a brand-new
+    local task in the current project, copies the other project's title +
+    tags, and emits a "[TELL USER]: I found saved context from project X"
+    line that the agent relays to the user. A false positive here is very
+    user-visible and hard to undo.
+
+    A cross-project match is accepted only when BOTH are true:
+      - BM25 confidence ≥ CROSS_PROJECT_CONFIDENCE_THRESHOLD, AND
+      - token overlap between the user's prompt and the task's title ≥
+        CROSS_PROJECT_TITLE_OVERLAP_MIN.
+
+    The title-overlap gate protects against BM25 collisions where a new
+    prompt happens to share domain vocabulary with an unrelated task in
+    a different repo.
+    """
+    if match.get("confidence", 0.0) < CROSS_PROJECT_CONFIDENCE_THRESHOLD:
+        return False
+    task = match.get("task")
+    if task is None:
+        return False
+    return _prompt_title_overlap(user_prompt, task) >= CROSS_PROJECT_TITLE_OVERLAP_MIN
+
+
+def _local_match_accepted(user_prompt: str, match: dict) -> bool:
+    """Decide whether a same-project BM25 match is strong enough to resume.
+
+    BM25 alone is not sufficient: a long objective full of common stems
+    (e.g. "data", "drop", "report", "fix") can produce a 0.7+ confidence
+    score against a prompt that shares zero meaningful vocabulary with
+    the matched task's title. Silently resuming such matches injects an
+    unrelated briefing into the agent context — the original "wrong
+    context loaded for new query" bug.
+
+    A local match is accepted only when BOTH are true:
+      - BM25 confidence ≥ LOCAL_CONFIDENCE_THRESHOLD, AND
+      - token overlap between the user's prompt and the task's title ≥
+        LOCAL_TITLE_OVERLAP_MIN.
+
+    The local overlap floor is deliberately gentler than the cross-project
+    one (0.10 vs 0.30): same-project matches are far more likely to be
+    legitimate continuations of the user's ongoing work, and we don't
+    want to penalise paraphrased-but-related prompts. The floor exists
+    only to reject pure BM25 noise (zero or near-zero literal overlap).
+    """
+    if match.get("confidence", 0.0) < LOCAL_CONFIDENCE_THRESHOLD:
+        return False
+    task = match.get("task")
+    if task is None:
+        return False
+    return _prompt_title_overlap(user_prompt, task) >= LOCAL_TITLE_OVERLAP_MIN
+
+
+def _match_accepted(user_prompt: str, match: dict, *, is_local: bool) -> bool:
+    """Single entry point that dispatches to the right gate for a match."""
+    if is_local:
+        return _local_match_accepted(user_prompt, match)
+    return _cross_project_match_accepted(user_prompt, match)
 
 
 def _clean_evidence(evidence: list[str]) -> str:
@@ -436,6 +712,30 @@ def format_auto_route_response(result: dict) -> str:
         lines.append(f"[TELL USER]: \"I loaded the active task '{task.title}' with saved context from previous sessions.\"")
         lines.append("")
         lines.append(result["briefing"])
+
+    elif result["action"] == "resumed_cross_project":
+        task = result["task"]
+        source = result.get("source_task")
+        conf = result.get("confidence", 0)
+        other = result.get("other_project", "unknown")
+        evidence = result.get("evidence", [])
+        matched = _clean_evidence(evidence)
+        lines.append(f"  [Stitch CROSS-PROJECT] Matched task lives in a DIFFERENT project: {other}")
+        lines.append(f"  [Stitch CROSS-PROJECT] Source: `{source.id}` — {source.title}" if source else "")
+        lines.append(f"  [Stitch CROSS-PROJECT] Confidence: {conf:.0%} (cross-project gate passed)")
+        if matched:
+            lines.append(f"  [Stitch CROSS-PROJECT] Matched terms: {matched}")
+        lines.append(f"  [Stitch CROSS-PROJECT] Created local task `{task.id}` cloning the foreign context")
+        lines.append("")
+        lines.append(
+            f"[TELL USER]: \"⚠️ I found context for '{task.title}' that originated in a "
+            f"DIFFERENT project ({other}) at {conf:.0%} match confidence, and cloned it here. "
+            f"If this is not the task you meant, tell me 'start fresh' or 'new task' and I'll "
+            f"discard it.\""
+        )
+        lines.append("")
+        if result.get("briefing"):
+            lines.append(result["briefing"])
 
     elif result["action"] == "found_in_other_project":
         task = result["task"]
@@ -621,7 +921,7 @@ def _build_enriched_objective(prompt: str) -> str:
     """Build an enriched objective that captures raw intent plus searchable keywords.
 
     Appends extracted intent keywords so vague future queries like
-    "check eucatur" can match a task created from a task-specific query like
+    "check eucatur" can match a task created from a specific query like
     "fix eucatur booking failures for last 2 days".
     """
     raw = prompt[:400]

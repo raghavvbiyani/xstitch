@@ -146,8 +146,8 @@ class TestDiscovery:
         assert not (tmp_path / "AGENTS.md").exists(), "Codex not installed"
         assert (tmp_path / ".gitignore").exists(), "Gitignore always created"
 
-    def test_gitignore_contains_only_stitch_dir(self, tmp_path):
-        """Gitignore must only contain .stitch/ — NOT agent instruction files.
+    def test_gitignore_contains_only_task_data_dirs(self, tmp_path):
+        """Gitignore must only contain task data dirs — NOT agent instruction files.
 
         Agent instruction files (CLAUDE.md, AGENTS.md, .cursorrules, etc.)
         must NOT be gitignored because agents need to read them at session start.
@@ -157,6 +157,7 @@ class TestDiscovery:
         _update_gitignore(tmp_path)
 
         gitignore = (tmp_path / ".gitignore").read_text()
+        assert ".ahcp/" in gitignore
         assert ".stitch/" in gitignore
         for agent_file in get_injected_file_paths():
             assert agent_file not in gitignore, (
@@ -181,13 +182,14 @@ class TestDiscovery:
         content = gitignore.read_text()
         assert "node_modules/" in content
         assert "*.pyc" in content
+        assert ".ahcp/" in content
         assert ".stitch/" in content
 
     def test_gitignore_fixes_old_bad_entries(self, tmp_path):
         """auto-setup must clean up gitignores that have agent files from older Stitch versions."""
         from xstitch.discovery import _update_gitignore, _GITIGNORE_MARKER, get_injected_file_paths
         gitignore = tmp_path / ".gitignore"
-        old_bad_entries = [".stitch/"] + get_injected_file_paths()
+        old_bad_entries = [".ahcp/", ".stitch/"] + get_injected_file_paths()
         old_section = f"{_GITIGNORE_MARKER}\n" + "\n".join(old_bad_entries) + f"\n{_GITIGNORE_MARKER}\n"
         gitignore.write_text("node_modules/\n\n" + old_section)
 
@@ -195,6 +197,7 @@ class TestDiscovery:
 
         content = gitignore.read_text()
         assert "node_modules/" in content
+        assert ".ahcp/" in content
         assert ".stitch/" in content
         for agent_file in get_injected_file_paths():
             assert agent_file not in content, (

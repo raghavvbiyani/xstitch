@@ -40,12 +40,12 @@ NC = "\033[0m"
 # ---------------------------------------------------------------------------
 
 class StitchInspector:
-    """Reads .stitch/ data files for a project and provides query helpers."""
+    """Reads .ahcp/ data files for a project and provides query helpers."""
 
     def __init__(self, project_path: str):
         self.project = Path(project_path)
-        self.stitch_dir = self.project / ".stitch"
-        self.tasks_dir = self.stitch_dir / "tasks"
+        self.ahcp_dir = self.project / ".ahcp"
+        self.tasks_dir = self.ahcp_dir / "tasks"
         self._task_id: str | None = None
         self._meta: dict | None = None
         self._decisions: list[dict] | None = None
@@ -54,7 +54,7 @@ class StitchInspector:
     @property
     def task_id(self) -> str | None:
         if self._task_id is None:
-            active_file = self.stitch_dir / "active_task"
+            active_file = self.ahcp_dir / "active_task"
             if active_file.exists():
                 self._task_id = active_file.read_text().strip()
         return self._task_id
@@ -267,11 +267,11 @@ def phase_0_checks(ins: StitchInspector) -> list[CheckResult]:
     """Baseline: verify the setup script seeded data correctly."""
     checks = []
 
-    # 1. .stitch directory exists
+    # 1. .ahcp directory exists
     checks.append(CheckResult(
         "Stitch directory exists",
-        ins.stitch_dir.exists(),
-        str(ins.stitch_dir) if ins.stitch_dir.exists() else "missing .stitch/",
+        ins.ahcp_dir.exists(),
+        str(ins.ahcp_dir) if ins.ahcp_dir.exists() else "missing .ahcp/",
     ))
 
     # 2. Task exists

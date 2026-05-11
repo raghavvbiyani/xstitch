@@ -233,7 +233,7 @@ Persistent search index for incremental updates.
 
 ### Storage
 
-- Path: `~/.stitch/projects/<key>/search_index.json`
+- Path: `~/.ahcp/projects/<key>/search_index.json`
 - JSON format, human-readable and debuggable
 
 ### PersistentIndex API

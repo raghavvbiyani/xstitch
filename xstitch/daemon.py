@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-PID_DIR = Path.home() / ".stitch" / "daemons"
+PID_DIR = Path.home() / ".ahcp" / "daemons"
 
 
 def _pid_file(project_path: str) -> Path:

@@ -303,6 +303,65 @@ TOOLS = [
             "required": ["summary"],
         },
     },
+    {
+        "name": "stitch_what_changed",
+        "description": "Discover cross-agent changes. Returns recent events (task/snapshot/decision creates, context/handoff regenerations, orphan moves) across all projects or filtered to one. WHEN: at the start of a session to see what other agents (Cursor, Claude Code, etc.) have done since your 'last seen' cursor.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "ISO timestamp lower bound. If omitted and agent_id is provided, uses that agent's stored 'last seen' cursor. If neither is provided, returns the most recent events.",
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent name for the 'last seen' cursor. Typically 'cursor' or 'claude-code'. Auto-detected from AHCP_AGENT env if omitted.",
+                },
+                "project": {
+                    "type": "string",
+                    "description": "Filter events to this project path (default: current project).",
+                },
+                "project_all": {
+                    "type": "boolean",
+                    "description": "If true, do not filter by project (show every agent's events). Defaults to false.",
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Filter events to this task only.",
+                },
+                "event_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of event types to include (e.g., ['task_updated','snapshot_added']).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max events to return (default 100).",
+                },
+                "mark_seen": {
+                    "type": "boolean",
+                    "description": "If true, advance the agent's 'last seen' cursor to now after reading. Defaults to false.",
+                },
+            },
+        },
+    },
+    {
+        "name": "stitch_mark_seen",
+        "description": "Advance this agent's 'last seen' cursor so future stitch_what_changed calls only surface newer events. Call at the end of a session or after you've processed a batch of events.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "Agent name. Auto-detected from AHCP_AGENT env if omitted.",
+                },
+                "ts": {
+                    "type": "string",
+                    "description": "ISO timestamp to set the cursor at. Defaults to now.",
+                },
+            },
+        },
+    },
 ]
 
 
@@ -344,7 +403,7 @@ class StitchServer:
             return self._response(req_id, {
                 "protocolVersion": client_version,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "xstitch", "version": "0.3.4"},
+                "serverInfo": {"name": "xstitch", "version": "0.4.0"},
             })
 
         elif method == "notifications/initialized":
@@ -573,7 +632,80 @@ class StitchServer:
                 f"Handoff bundle regenerated."
             )
 
+        elif name == "stitch_what_changed":
+            return self._handle_what_changed(args)
+
+        elif name == "stitch_mark_seen":
+            return self._handle_mark_seen(args)
+
         return f"Unknown tool: {name}"
+
+    # ------------------------------------------------------------------ #
+    # Cross-agent sync tool handlers
+    # ------------------------------------------------------------------ #
+
+    def _handle_what_changed(self, args: dict) -> str:
+        """Return recent events, filtered and optionally advancing the cursor."""
+        import os
+        from . import event_log
+
+        agent_id = args.get("agent_id") or os.environ.get("AHCP_AGENT") or "unknown"
+        since = args.get("since")
+        if not since:
+            cur = event_log.get_cursor(agent_id)
+            if cur:
+                since = cur.get("ts")
+
+        project_all = bool(args.get("project_all"))
+        project_filter = None
+        if not project_all:
+            project_filter = args.get("project") or str(self.store.project_path)
+
+        event_types = args.get("event_types")
+        filt = event_log.EventFilter(
+            since_ts=since,
+            project_path=project_filter,
+            task_id=args.get("task_id") or None,
+            event_types=event_types if event_types else None,
+        )
+        try:
+            limit = int(args.get("limit") or 100)
+        except (TypeError, ValueError):
+            limit = 100
+
+        events = event_log.read_events(filt=filt, limit=limit)
+
+        if args.get("mark_seen"):
+            event_log.set_cursor(agent_id)
+
+        if not events:
+            scope = "all projects" if project_all else f"project {project_filter}"
+            return f"No events since {since or 'forever'} for {scope}."
+
+        lines = []
+        for ev in events:
+            ts = ev.get("ts", "?")
+            et = ev.get("event_type", "?")
+            tid = ev.get("task_id", "?")[:12]
+            agent = ev.get("agent", "?")
+            meta = ev.get("meta") or {}
+            preview = meta.get("title") or meta.get("message_preview") or meta.get("problem_preview") or ""
+            preview = f" — {preview[:80]}" if preview else ""
+            lines.append(f"[{ts}] {et}  task={tid}  agent={agent}{preview}")
+        header = f"{len(events)} event(s)"
+        if since:
+            header += f" since {since}"
+        if project_filter:
+            header += f" in {project_filter}"
+        return f"{header}:\n" + "\n".join(lines)
+
+    def _handle_mark_seen(self, args: dict) -> str:
+        import os
+        from . import event_log
+        agent_id = args.get("agent_id") or os.environ.get("AHCP_AGENT") or "unknown"
+        ts = args.get("ts")
+        data = event_log.set_cursor(agent_id, ts=ts)
+        return f"Cursor for '{agent_id}' set to {data.get('ts')}."
 
     @staticmethod
     def _response(req_id, result):
@@ -585,11 +717,18 @@ class StitchServer:
 
 
 def run_server(project_path: str | None = None):
-    server = StitchServer(project_path)
+    # Route through the shared resolver so an MCP server started without
+    # --project still lands in the same project_key as the CLI. Otherwise
+    # Cursor-spawned servers (cwd=home) and Claude-spawned servers (cwd=repo)
+    # silently bucket into different projects and the same task looks
+    # "missing" to the other agent.
+    from .project_resolver import resolve_project_path
+    resolved = resolve_project_path(project_path)
+    server = StitchServer(str(resolved))
 
     # Signal readiness on stderr — Cursor and other MCP hosts wait for this
     # before sending the initialize message over stdin.
-    sys.stderr.write("Stitch MCP Server running on stdio\n")
+    sys.stderr.write(f"Stitch MCP Server running on stdio (project={resolved})\n")
     sys.stderr.flush()
 
     while True:

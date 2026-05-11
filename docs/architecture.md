@@ -1,5 +1,9 @@
 # Stitch v0.4.0 — Architecture, Approaches & Tradeoffs
 
+> **See also:** [`cross-agent-sync.md`](cross-agent-sync.md) for the
+> resolver/event-log/repair layer that keeps multi-agent sessions in
+> sync (v0.4.0).
+
 ## Problem Statement
 
 When using multiple AI tools (Cursor, Claude Code, Codex, Antigravity, etc.), context is lost on tool switch due to session/token limits. The new agent must rediscover decisions, experiments, and state — wasting tokens and often repeating mistakes.
@@ -103,7 +107,7 @@ breaking `unittest.mock.patch("xstitch.store.GLOBAL_HOME")`.
 │                         │                               │
 │  ┌──────────────────────▼───────────────────────────┐   │
 │  │              Storage Layer                        │   │
-│  │  ~/.stitch/projects/<key>/  │  Global registry     │   │
+│  │  ~/.ahcp/projects/<key>/  │  Global registry     │   │
 │  │  Per-task isolation       │  TTL auto-cleanup     │   │
 │  └──────────────────────────────────────────────────┘   │
 │                                                         │
@@ -134,9 +138,9 @@ breaking `unittest.mock.patch("xstitch.store.GLOBAL_HOME")`.
 
 ### Five Approaches Implemented (A–E)
 
-#### Approach A: File-Based Task Context (.stitch/ directory)
+#### Approach A: File-Based Task Context (.ahcp/ directory)
 
-**How it works**: Each task gets isolated storage under `.stitch/tasks/<task-id>/` with structured JSON + Markdown files. Context lives in the repo, is git-tracked, and readable by any tool.
+**How it works**: Each task gets isolated storage under `.ahcp/tasks/<task-id>/` with structured JSON + Markdown files. Context lives in the repo, is git-tracked, and readable by any tool.
 
 **Files per task:**
 - `meta.json` — Task metadata (title, objective, status, tags)
@@ -281,7 +285,7 @@ stitch daemon stop
 ```bash
 stitch inject
 # Creates/updates: CLAUDE.md, .cursorrules, .cursor/rules/stitch-context.mdc,
-#                  .github/copilot-instructions.md, .stitch/TASK_INDEX.md
+#                  .github/copilot-instructions.md, .ahcp/TASK_INDEX.md
 ```
 
 **Discovery mechanisms:**
@@ -313,10 +317,10 @@ stitch inject
 
 ### Technique 1: TaskID-Based Lookup
 User tells the agent: "Resume task `abc123`"
-Agent calls `stitch_get_task(task_id="abc123")` or reads `.stitch/tasks/abc123/context.md`
+Agent calls `stitch_get_task(task_id="abc123")` or reads `.ahcp/tasks/abc123/context.md`
 
 ### Technique 2: PageIndex Search
-Agent reads `.stitch/TASK_INDEX.md` or `.stitch/task_index.json` and browses tasks by title/tags/status. Picks the relevant one automatically.
+Agent reads `.ahcp/TASK_INDEX.md` or `.ahcp/task_index.json` and browses tasks by title/tags/status. Picks the relevant one automatically.
 
 ### Technique 3: Auto-Discovery via Config Files
 Agent starts session → reads CLAUDE.md / .cursorrules → sees Stitch instructions → reads active task → begins work with full context. **Zero human intervention.**
@@ -332,7 +336,7 @@ Agent starts session → reads CLAUDE.md / .cursorrules → sees Stitch instruct
 | MCP integration | Proposed as future | None | Working MCP server (9 tools) |
 | Agent auto-discovery | Not addressed | Not addressed | CLAUDE.md, .cursorrules, Copilot, PageIndex |
 | Token budget | Mentioned (1-3k target) | Not implemented | Built-in truncation + budget param |
-| Global registry | Not addressed | Not addressed | ~/.stitch/registry.json |
+| Global registry | Not addressed | Not addressed | ~/.ahcp/registry.json |
 | Cross-project search | Not addressed | Not addressed | `stitch search` + `stitch task list --all` |
 | Distribution | Suggested pip | Not addressed | pip-installable |
 
@@ -344,7 +348,7 @@ For maximum coverage, use all approaches together:
 
 ```bash
 # 1. Install Stitch
-pip install -e /path/to/AgentHandOffAndContextProtocol
+pip install -e /path/to/xstitch
 
 # 2. Initialize in your project
 cd /your/project

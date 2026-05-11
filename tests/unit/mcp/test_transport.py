@@ -43,7 +43,12 @@ class TestMCPDualProtocol:
 
             send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
             resp = recv()
-            assert len(resp["result"]["tools"]) == 14
+            # Expect at least the core Stitch tools; count grows over time as new tools are added
+            # (e.g., stitch_what_changed, stitch_mark_seen). Use >= to avoid brittle maintenance.
+            assert len(resp["result"]["tools"]) >= 14
+            tool_names = {t["name"] for t in resp["result"]["tools"]}
+            assert "stitch_create_task" in tool_names
+            assert "stitch_get_task" in tool_names
 
             send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                 "name": "stitch_create_task",

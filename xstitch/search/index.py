@@ -1,6 +1,6 @@
 """Persistent search index with incremental updates.
 
-Stores the tokenized index at ~/.stitch/projects/<key>/search_index.json
+Stores the tokenized index at ~/.ahcp/projects/<key>/search_index.json
 so that repeated searches don't re-tokenize all tasks from scratch.
 
 Design decisions:

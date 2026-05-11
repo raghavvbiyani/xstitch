@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xstitch"
-version = "0.3.0"
+version = "0.4.0"
 description = "Stitch — cross-tool memory for AI agents. Never re-explain your work."
 readme = "README.md"
 license = {text = "MIT"}
