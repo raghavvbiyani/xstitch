@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from .store import Store
-from .models import Task, from_json
+from .models import Task, Snapshot, from_json
 from .capture import is_git_repo
 from .relevance import (
     BM25RelevanceEngine,
@@ -65,6 +65,9 @@ LOCAL_CONFIDENCE_THRESHOLD = 0.65
 LOCAL_TITLE_OVERLAP_MIN = 0.10
 CROSS_PROJECT_CONFIDENCE_THRESHOLD = 0.55
 CROSS_PROJECT_TITLE_OVERLAP_MIN = 0.30
+LOCAL_AUTO_ACCEPT_CONFIDENCE = 0.80
+CROSS_PROJECT_AUTO_ACCEPT_CONFIDENCE = 0.78
+AMBIGUOUS_MATCH_MARGIN = 0.12
 # Explicit-resume fallback: when the user literally said "resume/continue",
 # loading *some* context is better than none, so we keep the historical
 # 0.40 bar for the top match.
@@ -336,6 +339,7 @@ def auto_route(user_prompt: str, store: Store) -> dict:
             result["briefing"] = ""
         else:
             task = store.create_task(title=title, objective=objective, tags=tags)
+            _persist_initial_prompt(store, task, user_prompt)
             result["action"] = "created"
             result["task"] = task
 
@@ -346,7 +350,10 @@ def auto_route(user_prompt: str, store: Store) -> dict:
             best_is_local = store.task_is_local(best["task"].id)
             match_ok = _match_accepted(user_prompt, best, is_local=best_is_local)
             if match_ok:
-                result = _handle_resume(user_prompt, store, result)
+                if _match_needs_confirmation(user_prompt, matches, store):
+                    result = _needs_confirmation(user_prompt, store, result, matches, "match confidence is not decisive enough to auto-load context")
+                else:
+                    result = _handle_resume(user_prompt, store, result)
             elif _is_conversational(user_prompt):
                 active_id = store.get_active_task_id()
                 if active_id:
@@ -357,7 +364,7 @@ def auto_route(user_prompt: str, store: Store) -> dict:
                 if result["action"] is None:
                     result["action"] = "greeting"
             else:
-                result = _create_or_dedup(user_prompt, store, result)
+                result = _needs_confirmation(user_prompt, store, result, matches, "similar tasks exist but failed the context-match gate")
         elif _is_conversational(user_prompt):
             active_id = store.get_active_task_id()
             if active_id:
@@ -387,8 +394,27 @@ def _create_or_dedup(user_prompt: str, store: Store, result: dict) -> dict:
     tags = _extract_intent_tags(user_prompt)
     objective = _build_enriched_objective(user_prompt)
     task = store.create_task(title=title, objective=objective, tags=tags)
+    _persist_initial_prompt(store, task, user_prompt)
     result["action"] = "created"
     result["task"] = task
+    return result
+
+
+def _needs_confirmation(user_prompt: str, store: Store, result: dict, matches: list[dict], reason: str) -> dict:
+    """Return a non-destructive ambiguity result.
+
+    This is intentionally not a task mutation. When Stitch is not confident,
+    the correct behavior is to ask the user whether to resume one of the
+    candidates or start fresh, not to silently load a briefing or create a
+    new task that may be wrong.
+    """
+    result["action"] = "needs_confirmation"
+    result["matches"] = matches[:5]
+    result["confirmation_reason"] = reason
+    active_id = store.get_active_task_id()
+    if active_id:
+        result["active_task"] = store.get_task(active_id)
+    result["prompt"] = user_prompt
     return result
 
 
@@ -422,7 +448,21 @@ def _handle_resume(user_prompt: str, store: Store, result: dict) -> dict:
         # context: it actively misleads the agent.
         is_local = store.task_is_local(task.id)
         if not _match_accepted(user_prompt, best, is_local=is_local):
-            matches = []  # treat as no match → fall through to active-task fallback
+            return _needs_confirmation(
+                user_prompt,
+                store,
+                result,
+                matches,
+                "explicit resume request matched tasks, but the best match failed the context-match gate",
+            )
+        if _match_needs_confirmation(user_prompt, matches, store):
+            return _needs_confirmation(
+                user_prompt,
+                store,
+                result,
+                matches,
+                "explicit resume request matched tasks, but confidence is not decisive enough to auto-load context",
+            )
 
     if matches and matches[0]["confidence"] >= RESUME_INTENT_MIN_CONFIDENCE:
         best = matches[0]
@@ -482,8 +522,13 @@ def _handle_resume(user_prompt: str, store: Store, result: dict) -> dict:
                 result["matches"] = matches[:5]
 
     elif matches:
-        result["action"] = "show_matches"
-        result["matches"] = matches[:5]
+        return _needs_confirmation(
+            user_prompt,
+            store,
+            result,
+            matches,
+            "resume request found possible matches below the auto-load confidence threshold",
+        )
 
     else:
         active_id = store.get_active_task_id()
@@ -580,6 +625,37 @@ def _prompt_title_overlap(user_prompt: str, task: Task) -> float:
     intersection = prompt_tokens & title_tokens
     union = prompt_tokens | title_tokens
     return len(intersection) / len(union)
+
+
+def _match_needs_confirmation(user_prompt: str, matches: list[dict], store: Store) -> bool:
+    """Return True when a technically valid match is still not decisive.
+
+    The acceptance gate blocks obvious false positives. This second gate
+    prevents over-confident automation when the score is merely acceptable or
+    when another candidate is close enough that a human should choose.
+    """
+    if not matches:
+        return False
+    best = matches[0]
+    best_task = best.get("task")
+    if best_task is None:
+        return True
+
+    best_is_local = store.task_is_local(best_task.id)
+    auto_threshold = LOCAL_AUTO_ACCEPT_CONFIDENCE if best_is_local else CROSS_PROJECT_AUTO_ACCEPT_CONFIDENCE
+    if best.get("confidence", 0.0) < auto_threshold:
+        return True
+
+    for other in matches[1:3]:
+        other_task = other.get("task")
+        if other_task is None:
+            continue
+        other_is_local = store.task_is_local(other_task.id)
+        if not _match_accepted(user_prompt, other, is_local=other_is_local):
+            continue
+        if best.get("confidence", 0.0) - other.get("confidence", 0.0) <= AMBIGUOUS_MATCH_MARGIN:
+            return True
+    return False
 
 
 def _cross_project_match_accepted(user_prompt: str, match: dict) -> bool:
@@ -704,6 +780,30 @@ def format_auto_route_response(result: dict) -> str:
             lines.append("")
         lines.append("[TELL USER]: \"I found multiple tasks that might match. Which one should I resume?\" Then list the options.")
 
+    elif result["action"] == "needs_confirmation":
+        matches = result.get("matches", [])
+        reason = result.get("confirmation_reason", "confidence is not high enough")
+        lines.append("  [Stitch CONFIRM] Possible existing context found, but Stitch will not auto-load it.")
+        lines.append(f"  [Stitch CONFIRM] Reason: {reason}.")
+        lines.append("")
+        for i, m in enumerate(matches, 1):
+            t = m["task"]
+            conf = m.get("confidence", 0)
+            overlap = _prompt_title_overlap(result.get("prompt", ""), t)
+            lines.append(f"  {i}. `{t.id}` — {t.title} ({conf:.0%}, title overlap {overlap:.0%})")
+            lines.append(f"     Project: {t.project_path}")
+            if t.current_state:
+                lines.append(f"     State: {t.current_state[:100]}")
+            lines.append("")
+        active = result.get("active_task")
+        if active:
+            lines.append(f"  Active task: `{active.id}` — {active.title}")
+            lines.append("")
+        lines.append(
+            "[TELL USER]: \"I found possible saved context, but I am not confident enough to choose automatically. "
+            "Should I resume one of these tasks, or start a new task for this request?\" Then list the options."
+        )
+
     elif result["action"] == "loaded_active":
         task = result["task"]
         lines.append(f"  [Stitch OK] Loaded active task: `{task.id}` — {task.title}")
@@ -773,6 +873,27 @@ def format_auto_route_response(result: dict) -> str:
             lines.append(f"  - `{h['project_name']}` ({', '.join(h['evidence'][:3])})")
 
     return "\n".join(lines)
+
+
+def _persist_initial_prompt(store: Store, task: Task, user_prompt: str) -> None:
+    """Persist the full initial user request as durable task context."""
+    prompt = (user_prompt or "").strip()
+    if not prompt:
+        return
+
+    task.current_state = (
+        "Task created from the user's initial request. "
+        "See the initial_user_prompt snapshot for the full verbatim prompt."
+    )
+    store.update_task(task)
+    snapshot = Snapshot(
+        task_id=task.id,
+        source="agent",
+        message=f"Initial user request captured for context: {prompt[:500]}",
+        extra={"kind": "initial_user_prompt", "full_prompt": prompt[:8000]},
+    )
+    store.add_snapshot(task.id, snapshot)
+    store.update_context_file(task.id)
 
 
 # --- Helpers ---

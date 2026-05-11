@@ -278,7 +278,7 @@ TOOLS = [
     },
     {
         "name": "stitch_auto_route",
-        "description": "THE PRIMARY ENTRY POINT — call this FIRST when a user starts a session. Pass the user's message here. Stitch will: (1) auto-setup the project, (2) detect resume vs new, (3) find matching task by relevance, (4) return saved context. IMPORTANT: Tell the user what happened. During the session, push updates via stitch_snapshot (after each step), stitch_add_decision (after choices), and stitch_checkpoint (before ending session or context summarization).",
+        "description": "THE PRIMARY ENTRY POINT — call this FIRST when a user starts a session. Pass the user's message here. Stitch will: (1) auto-setup the project, (2) detect resume vs new, (3) find matching task by relevance, (4) return saved context only when confidence is decisive, or ask for user confirmation when ambiguous. IMPORTANT: Tell the user what happened. During the session, push updates via stitch_snapshot (after each step), stitch_add_decision (after choices), and stitch_checkpoint (before ending session or context summarization).",
         "inputSchema": {
             "type": "object",
             "properties": {

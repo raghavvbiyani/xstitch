@@ -228,6 +228,7 @@ stitch handoff                 # Generate handoff bundle
 stitch events [--since ISO]    # Cross-agent sync feed: what changed since your cursor
 stitch mark-seen               # Advance this agent's last-seen cursor
 stitch init --pin              # Drop a .ahcp sentinel for non-git project roots
+stitch wiki init               # Optional LLM-wiki scaffold for durable project knowledge
 
 stitch doctor                  # Diagnose installation health
 stitch doctor --repair         # Re-home tasks filed under the wrong project scope
@@ -241,6 +242,7 @@ stitch doctor --repair         # Re-home tasks filed under the wrong project sco
 
 - [Architecture](docs/architecture.md) — system design, module structure, design decisions
 - [Cross-Agent Sync](docs/cross-agent-sync.md) — resolver, event log, repair flow (v0.4.0)
+- [LLM Wiki](docs/llm-wiki.md) — optional raw/source/wiki/log scaffold for durable project synthesis
 - [Search Engine Design](docs/search-design.md) — BM25, fuzzy matching, embeddings, score fusion
 - [Adding New Tools](docs/adding-tools.md) — plugin system, entry points, integration guide
 - [Contributing](CONTRIBUTING.md) — development workflow, code style, testing

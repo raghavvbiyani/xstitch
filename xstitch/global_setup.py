@@ -176,12 +176,16 @@ Use this skill at the start of every session and when pushing context updates.
 ## Session Start
 1. Run `python3 -m xstitch.cli auto-setup`
 2. Run `python3 -m xstitch.cli auto "<user's first message>"`
+3. Only relay the `[TELL USER]` line from `auto`. Do not treat an `auto-setup`
+   "active task" line as loaded context.
 
 ## During Session
 - After sub-tasks: `python3 -m xstitch.cli snap -m "what was done"`
 - After decisions: `python3 -m xstitch.cli decide -p "problem" -c "chosen" -a "alts" -r "why"`
 - Every 2-3 minutes: `python3 -m xstitch.cli snap -m "progress"`
 - Before ending: `python3 -m xstitch.cli checkpoint -s "summary" -d "decisions" -e "experiments" -f "failures" -q "questions"`
+- If the work produced durable project knowledge, run `python3 -m xstitch.cli wiki init`
+  and update/log the wiki instead of leaving the knowledge only in chat.
 """
 
 
@@ -345,8 +349,7 @@ GLOBAL_INSTRUCTIONS = f"""\
 ## Stitch — Agent Handoff & Context Protocol
 
 This developer uses Stitch for cross-tool context preservation.
-Stitch is installed. Use `python3 -m xstitch.cli` to run commands.
-Stitch prevents duplicate notes automatically — push freely without worrying about repetition.
+Use `python3 -m xstitch.cli`. Stitch deduplicates notes, so push freely.
 
 ### Session Start (FIRST THING — before responding to the user)
 ```
@@ -354,10 +357,9 @@ python3 -m xstitch.cli auto-setup
 python3 -m xstitch.cli auto "<user's first message>"
 ```
 
-**Tell the user what happened:**
-- Resumed: "I found existing context for '<title>' and loaded it."
-- New task: "I created a new task '<title>' (ID: xxx)."
-- No match: "No matching prior work found. Starting fresh."
+Tell the user only what `auto` decided: resumed, created, no match, or unsure.
+If unsure, ask which task to resume or whether to start fresh. Do not treat an
+`auto-setup` active-task notice as loaded context.
 
 ### WHEN to Push — Specific Triggers
 
@@ -368,6 +370,7 @@ Push **immediately** when any of these happen:
 3. **Experiment failed**: `python3 -m xstitch.cli snap -m "FAILED: what was tried + why it failed"`
 4. **Hit a blocker**: `python3 -m xstitch.cli task update --blockers "description" --state "current state"`
 5. **Every 2-3 minutes** of active work: `python3 -m xstitch.cli snap -m "progress summary"`
+6. **Reusable project knowledge created**: update the LLM wiki (`wiki init`, `wiki log`).
 
 ### Quality Rules
 - Every snapshot must answer: **What** was done + **What** was the result.
@@ -533,6 +536,8 @@ Every decision: **What** problem + **What** chosen + **What** rejected + **Why**
 Every checkpoint: pass ALL five fields (`-s`, `-d`, `-e`, `-f`, `-q`). Empty
 ones are fine; the point is to force yourself to audit each category before
 the context rolls.
+If a result should help future tasks, put the synthesized knowledge in the
+LLM wiki too; snapshots are chronological, the wiki is reusable synthesis.
 
 ## Before Session End or Context Summarization
 

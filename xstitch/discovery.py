@@ -34,6 +34,11 @@ python3 -m xstitch.cli auto "<user's first message>"
 - Resumed: "I found and loaded saved context for '<title>'."
 - New task: "I created a new task '<title>' (ID: xxx)."
 - No match: "No prior context found. Starting fresh."
+- Unsure: "I found possible saved context but I am not confident enough to choose automatically. Which task should I resume, or should I start fresh?"
+
+Important: only say context was "loaded" when the `auto` output explicitly says
+it loaded/resumed context. `auto-setup` may print an active task for visibility;
+that is not a resume decision.
 
 ### WHEN to Push — Triggers (push immediately when any happen)
 
@@ -42,6 +47,7 @@ python3 -m xstitch.cli auto "<user's first message>"
 3. **Experiment failed**: `python3 -m xstitch.cli snap -m "FAILED: what was tried + why it failed"`
 4. **Hit a blocker**: `python3 -m xstitch.cli task update --blockers "blocker" --state "current state"`
 5. **Every 2-3 minutes** of active work: `python3 -m xstitch.cli snap -m "progress summary"`
+6. **Reusable project knowledge created**: initialize/update the LLM wiki with `python3 -m xstitch.cli wiki init` and append `python3 -m xstitch.cli wiki log -k task -s "subject" -m "what changed"`
 
 ### Quality Rules
 - Every snapshot must answer: **What** was done + **What** was the result.
@@ -68,7 +74,8 @@ CURSORRULES_INJECTION = f"""\
 
 ## MANDATORY: Session start (before any response)
 1. Call MCP tool `stitch_auto_route` with the user's message
-2. Tell the user: "Loaded context for '<title>'" or "Created task '<title>'" or "No prior context found."
+2. Tell the user exactly what `stitch_auto_route` decided: loaded context, created task, no match, or needs confirmation. If it needs confirmation, ask the user to choose a task or start fresh.
+3. Do not treat an active-task notice as loaded context unless `stitch_auto_route` explicitly says it loaded/resumed.
 
 ## WHEN to Push — Triggers (push immediately when any happen)
 1. **Completed a sub-task**: `stitch_snapshot` — what was done + outcome
@@ -84,6 +91,7 @@ CURSORRULES_INJECTION = f"""\
 ## Before session end
 - `stitch_checkpoint` with summary/decisions/experiments/failures/questions
 - `stitch_update_task` with current state and ordered next steps
+- If durable project knowledge changed, update the LLM wiki (`stitch wiki init`, then edit wiki pages/log).
 
 ## Troubleshooting
 - If Stitch MCP tools are unavailable, use CLI: `python3 -m xstitch.cli auto-setup`

@@ -51,7 +51,10 @@ stitch auto "build a REST API for users"       # Creates new task
 stitch auto "hi"                               # No context loaded (conversational)
 ```
 
-Returns a JSON response with the action taken (`resumed`, `created`, `greeting`, etc.) and any context to inject.
+Returns formatted routing guidance with the action taken (`resumed`,
+`created`, `greeting`, `needs_confirmation`, etc.) and any context to inject.
+When confidence is not decisive, Stitch does not load context; it asks the user
+which task to resume or whether to start fresh.
 
 ---
 
@@ -189,6 +192,18 @@ stitch launchd install --interval 600
 stitch launchd status
 stitch launchd uninstall
 ```
+
+### `stitch wiki`
+
+Optional LLM-wiki scaffold for durable project synthesis.
+
+```bash
+stitch wiki init
+stitch wiki status
+stitch wiki log --kind query --subject "routing bug" --message "Captured the ambiguity policy."
+```
+
+See [LLM Wiki](llm-wiki.md).
 
 ---
 

@@ -257,8 +257,11 @@ class TestCrossProjectTitleOverlapGate:
                 f"Domain-vocabulary overlap must not trigger cross-project clone. "
                 f"Got action={result['action']}"
             )
-            assert result["action"] in ("created", "resumed")
-            assert result["task"] is not None
+            assert result["action"] in ("needs_confirmation", "created", "resumed")
+            if result["action"] == "needs_confirmation":
+                assert result["matches"]
+            else:
+                assert result["task"] is not None
 
     def test_identical_prompt_still_cross_clones(self, tmp_path, fake_global):
         """Same user running the SAME prompt in two projects must still clone."""
@@ -347,10 +350,57 @@ class TestLocalMatchOverlapGate:
             prompt = "analyze provider funnel data"
             result = auto_route(prompt, store)
 
-            assert result["action"] == "created", (
-                f"Local match with zero title overlap must create a fresh task, "
+            assert result["action"] == "needs_confirmation", (
+                f"Local match with zero title overlap must ask the user, "
                 f"got action={result['action']}"
             )
+            assert result["matches"]
+
+    def test_accepted_but_low_confidence_match_needs_confirmation(self, tmp_path, fake_global):
+        """The second gate asks the user when confidence is below auto-accept."""
+        from xstitch.intelligence import _match_needs_confirmation
+        from xstitch.store import Store
+
+        with patch("xstitch.store.GLOBAL_HOME", fake_global), \
+             patch("xstitch.store.PROJECTS_HOME", fake_global / "projects"):
+            store = Store(str(tmp_path))
+            store.init_project()
+            task = store.create_task(
+                title="Debug flaky checkout payments",
+                objective=(
+                    "Investigate checkout payments failures. Payment provider errors, "
+                    "checkout sessions, retry logic, and failure buckets need analysis."
+                ),
+                tags=["checkout", "payments", "failures", "analysis"],
+            )
+
+            assert _match_needs_confirmation(
+                "checkout payments analysis",
+                [{"task": task, "confidence": 0.70, "evidence": []}],
+                store,
+            ) is True
+
+    def test_created_task_stores_initial_prompt_snapshot(self, tmp_path, fake_global):
+        """New tasks should preserve the full initial prompt for the next agent."""
+        from xstitch.intelligence import auto_route
+        from xstitch.store import Store
+
+        prompt = (
+            "Investigate why auto route picked the wrong prior context, add user "
+            "confirmation for uncertain matches, and integrate an LLM wiki scaffold."
+        )
+        with patch("xstitch.store.GLOBAL_HOME", fake_global), \
+             patch("xstitch.store.PROJECTS_HOME", fake_global / "projects"):
+            store = Store(str(tmp_path))
+            store.init_project()
+            result = auto_route(prompt, store)
+
+            assert result["action"] == "created"
+            task = result["task"]
+            snapshots = store.get_snapshots(task.id, limit=10)
+            assert snapshots
+            assert snapshots[-1].extra["kind"] == "initial_user_prompt"
+            assert snapshots[-1].extra["full_prompt"] == prompt
 
     def test_local_match_with_meaningful_overlap_still_resumes(self, tmp_path, fake_global):
         """Genuine paraphrased prompt with literal-word overlap must still resume."""

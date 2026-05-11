@@ -202,6 +202,16 @@ def main():
     cleanup_p.add_argument("--dry-run", action="store_true",
                            help="Show what would be removed without deleting")
 
+    # --- wiki (LLM-maintained project knowledge base) ---
+    wiki_p = sub.add_parser("wiki", help="Manage the project LLM-wiki scaffold")
+    wiki_sub = wiki_p.add_subparsers(dest="wiki_command")
+    wiki_sub.add_parser("init", help="Create the local wiki scaffold")
+    wiki_sub.add_parser("status", help="Show wiki location and file count")
+    wiki_log = wiki_sub.add_parser("log", help="Append an entry to the wiki log")
+    wiki_log.add_argument("-k", "--kind", default="note", help="Entry kind: ingest, query, lint, task, note")
+    wiki_log.add_argument("-s", "--subject", default="manual", help="Entry subject")
+    wiki_log.add_argument("-m", "--message", required=True, help="Log message")
+
     # --- context-resolve (record user's conflict resolution) ---
     cr_p = sub.add_parser("context-resolve", help="Record user's conflict resolution")
     cr_p.add_argument("--conflict-id", required=True, help="Conflict ID from freshness report")
@@ -296,6 +306,8 @@ def main():
             _cmd_launchd(args)
         elif args.command == "cleanup":
             _cmd_cleanup(args)
+        elif args.command == "wiki":
+            _cmd_wiki(store, args)
         elif args.command == "context-resolve":
             _cmd_context_resolve(store, args)
         elif args.command == "context-verify":
@@ -841,6 +853,31 @@ def _cmd_cleanup(args):
             store = Store()
             store._prune_registry_stale_entries()
             print("Global registry pruned.")
+
+
+def _cmd_wiki(store: Store, args):
+    """Manage the optional Stitch LLM-wiki scaffold."""
+    from . import wiki
+
+    if args.wiki_command == "init":
+        path = wiki.init_wiki(store)
+        print(f"Initialized Stitch LLM wiki at {path}")
+        print(f"Schema: {path / 'schema.md'}")
+        print(f"Index:  {path / 'index.md'}")
+        print(f"Log:    {path / 'log.md'}")
+    elif args.wiki_command == "status":
+        info = wiki.status(store)
+        print(f"Wiki path: {info['path']}")
+        print(f"Exists: {info['exists']}")
+        print(f"Markdown files: {info['markdown_files']}")
+        print(f"Schema: {info['schema']}")
+        print(f"Index: {info['index']}")
+        print(f"Log: {info['log']}")
+    elif args.wiki_command == "log":
+        path = wiki.append_log(store, args.kind, args.subject, args.message)
+        print(f"Appended wiki log entry to {path}")
+    else:
+        print("Usage: stitch wiki {init|status|log}")
 
 
 def _cmd_context_resolve(store: Store, args):
