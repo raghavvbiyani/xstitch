@@ -3,6 +3,9 @@
 > **See also:** [`cross-agent-sync.md`](cross-agent-sync.md) for the
 > resolver/event-log/repair layer that keeps multi-agent sessions in
 > sync (v0.4.0).
+> **See also:** [`context-compaction-hooks.md`](context-compaction-hooks.md)
+> for the lifecycle-hook strategy used to preserve research before automatic
+> context summarization.
 
 ## Problem Statement
 
@@ -135,6 +138,7 @@ breaking `unittest.mock.patch("xstitch.store.GLOBAL_HOME")`.
 | Plugin system | Python entry_points | Config file registry | Standard, works with pip, no config files to manage |
 | TTL cleanup | 45-day auto with cooldown | Manual only | Prevents unbounded disk growth without user intervention |
 | Skills support | Optional per-tool mixin | Separate skills manager | Keeps it simple; not all tools support skills |
+| Pre-compaction capture | Tool lifecycle hooks where available, proactive checkpoints elsewhere | Raw chat archival for every tool | Claude Code and Gemini expose hooks; Codex and several editor agents do not expose a stable pre-compact event Stitch can configure today |
 
 ### Five Approaches Implemented (A–E)
 

@@ -226,9 +226,16 @@ def main():
 
     # --- hook-handler (called by Claude Code hooks, reads stdin) ---
     hh_p = sub.add_parser("hook-handler", help="Handle Claude Code hook events (reads JSON from stdin)")
-    hh_p.add_argument("--event", required=True,
-                       choices=["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"],
-                       help="The hook event name")
+    hh_p.add_argument(
+        "--event",
+        required=True,
+        choices=[
+            "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop",
+            "SessionStart", "SessionEnd", "PreCompact", "PostCompact",
+            "BeforeAgent", "AfterTool", "BeforeTool", "PreCompress",
+        ],
+        help="The hook event name",
+    )
 
     # --- events (cross-agent activity feed) ---
     ev_p = sub.add_parser(
@@ -923,10 +930,16 @@ def _cmd_context_verify(store: Store, args):
 from pathlib import Path as _Path
 
 _SESSION_STATE_FILE = _Path.home() / ".ahcp" / "session_state.json"
-_SIGNIFICANT_TOOLS = {"Bash", "Edit", "Write", "NotebookEdit"}
+_SIGNIFICANT_TOOLS = {
+    # Claude Code
+    "Bash", "Edit", "Write", "NotebookEdit",
+    # Gemini CLI built-ins
+    "run_shell_command", "read_file", "write_file", "replace", "edit", "glob", "grep",
+}
 _SNAP_EVERY_N_TOOLS = 3       # snapshot every 3 significant tool calls
 _SNAP_EVERY_SECONDS = 180     # OR every 3 minutes, whichever comes first
 _SESSION_CONTINUITY_WINDOW = 1800  # 30 min: treat prompt as "same session" if Stop was < 30m ago
+_TRANSCRIPT_TAIL_BYTES = 1_000_000
 
 
 def _load_session_state() -> dict:
@@ -1071,13 +1084,26 @@ def _describe_tool(tool_name: str, tool_input: dict, tool_response: dict | None 
         label = _semantic_bash(cmd)
         return f"{label}{outcome}"
 
-    if tool_name == "Edit":
-        fp = _Path(str(tool_input.get("file_path", ""))).name
+    if tool_name == "run_shell_command":
+        cmd = str(
+            tool_input.get("command", "")
+            or tool_input.get("cmd", "")
+            or tool_input.get("shell_command", "")
+        ).strip().replace("\n", " ")
+        label = _semantic_bash(cmd)
+        return f"{label}{outcome}"
+
+    if tool_name in {"Edit", "replace", "edit"}:
+        fp = _Path(str(tool_input.get("file_path", "") or tool_input.get("path", ""))).name
         return f"Edited {fp}{outcome}" if fp else f"Edit{outcome}"
 
-    if tool_name == "Write":
-        fp = _Path(str(tool_input.get("file_path", ""))).name
+    if tool_name in {"Write", "write_file"}:
+        fp = _Path(str(tool_input.get("file_path", "") or tool_input.get("path", ""))).name
         return f"Wrote {fp}{outcome}" if fp else f"Write{outcome}"
+
+    if tool_name in {"read_file", "glob", "grep"}:
+        fp = _Path(str(tool_input.get("path", "") or tool_input.get("file_path", "") or tool_input.get("pattern", ""))).name
+        return f"{tool_name} {fp}{outcome}".strip()
 
     if tool_name == "NotebookEdit":
         fp = _Path(str(tool_input.get("notebook_path", ""))).name
@@ -1102,6 +1128,138 @@ def _seconds_since(ts: str) -> float:
 def _now_iso_local() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _active_store_task(store: Store):
+    active = store.get_active_task_id()
+    return active, store.get_task(active) if active else None
+
+
+def _session_recent_tools(state: dict, session_id: str) -> list[str]:
+    total = state.get("sig_tool_count", 0) if state.get("session_id") == session_id else 0
+    return state.get("recent_tools", []) if total > 0 else []
+
+
+def _copy_transcript_tail(store: Store, task_id: str, transcript_path: str, prefix: str) -> str:
+    """Copy the last part of an agent transcript into the task folder."""
+    if not transcript_path:
+        return ""
+    src = _Path(transcript_path)
+    if not src.exists() or not src.is_file():
+        return ""
+
+    task_dir = store.tasks_dir / task_id / "compact-transcripts"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    stamp = _now_iso_local().replace(":", "").replace("+", "Z")
+    dest = task_dir / f"{prefix}-{stamp}.jsonl"
+    try:
+        size = src.stat().st_size
+        with src.open("rb") as f:
+            if size > _TRANSCRIPT_TAIL_BYTES:
+                f.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            data = f.read()
+        dest.write_bytes(data)
+        return str(dest)
+    except OSError:
+        return ""
+
+
+def _save_compaction_checkpoint(store: Store, stdin_data: dict, event: str, session_id: str) -> str:
+    """Persist a rich checkpoint when a tool announces compaction/compression."""
+    active, task = _active_store_task(store)
+    if not active:
+        return ""
+
+    state = _load_session_state()
+    recent = _session_recent_tools(state, session_id)
+    trigger = stdin_data.get("trigger") or stdin_data.get("compact_type") or stdin_data.get("matcher") or "unknown"
+    transcript_copy = _copy_transcript_tail(
+        store,
+        active,
+        str(stdin_data.get("transcript_path", "")),
+        "precompact",
+    )
+
+    summary = (
+        f"Agent context compaction/compression is starting ({event}, trigger={trigger}). "
+        f"Preserved recent tool activity and transcript tail for recovery."
+    )
+    experiments = "; ".join(recent[-12:]) if recent else "No significant tool activity was recorded by hooks before compaction."
+    failures = "If compaction fails or drops context, resume from this checkpoint and the saved transcript tail."
+    questions = "Continue from the latest confirmed user request; do not repeat research already present in this checkpoint/transcript."
+    if transcript_copy:
+        questions += f" Transcript tail: {transcript_copy}"
+
+    from .capture import capture_pre_summarize_snapshot
+    snap = capture_pre_summarize_snapshot(
+        summary=summary,
+        decisions_made="",
+        experiments=experiments,
+        failures=failures,
+        open_questions=questions,
+        cwd=str(store.project_path),
+        task_id=active,
+    )
+    snap.source = "hook-pre-compact"
+    snap.extra.update({
+        "hook_event": event,
+        "trigger": trigger,
+        "transcript_tail_path": transcript_copy,
+        "recent_tools": recent[-20:],
+    })
+    rejection = store.add_snapshot(active, snap)
+    if not rejection:
+        store.update_context_file(active)
+        store.build_handoff(active)
+
+    if task and not task.current_state.strip():
+        task.current_state = "Context compaction started; Stitch saved a pre-compact checkpoint with recent tool activity."
+        store.update_task(task)
+        store.update_context_file(active)
+
+    state["last_precompact_time"] = _now_iso_local()
+    state["last_precompact_event"] = event
+    state["last_precompact_task"] = active
+    _save_session_state(state)
+    return f"Stitch saved pre-compact checkpoint for task {active[:8]}"
+
+
+def _save_session_end_snapshot(store: Store, event: str, session_id: str) -> str:
+    active, task = _active_store_task(store)
+    state = _load_session_state()
+    if not active:
+        state["stop_time"] = _now_iso_local()
+        state["stop_session_id"] = session_id
+        _save_session_state(state)
+        return ""
+
+    from .capture import capture_snapshot
+    recent = _session_recent_tools(state, session_id)
+    total = state.get("sig_tool_count", 0) if state.get("session_id") == session_id else 0
+    if total > 0:
+        msg = f"Session ended ({event}) — {total} significant action(s). Done: {'; '.join(recent[-5:])}"
+    else:
+        msg = f"Agent session ended ({event})"
+
+    snap = capture_snapshot(
+        message=msg,
+        source="hook-session-end",
+        cwd=str(store.project_path),
+        task_id=active,
+    )
+    rejection = store.add_snapshot(active, snap)
+    if not rejection:
+        store.update_context_file(active)
+
+    if total > 0 and task and not task.current_state.strip():
+        task.current_state = f"[Auto] Last session performed {total} action(s): {'; '.join(recent[-3:])}"
+        store.update_task(task)
+        store.update_context_file(active)
+
+    state["stop_time"] = _now_iso_local()
+    state["stop_session_id"] = session_id
+    _save_session_state(state)
+    return f"Stitch saved session-end snapshot for task {active[:8]}"
 
 
 def _append_session_continuity(context_msg: str, current_session_id: str) -> str:
@@ -1170,14 +1328,13 @@ def _cmd_hook_handler(store: Store, args):
     Reads JSON from stdin (provided by Claude Code), performs the appropriate
     action, and outputs structured JSON to stdout.
 
-    For UserPromptSubmit, outputs JSON with:
+    For UserPromptSubmit / BeforeAgent, outputs JSON with:
     - systemMessage: visible warning shown to the user in the UI
     - additionalContext: injected into the agent's conversation context
 
-    For PostToolUse, auto-snapshots every N significant tool calls or every
+    For PostToolUse / AfterTool, auto-snapshots every N significant tool calls or every
     N minutes — no agent cooperation required.
     """
-    from . import log
     from .intelligence import auto_setup, auto_route, format_auto_route_response
 
     event = args.event
@@ -1191,7 +1348,7 @@ def _cmd_hook_handler(store: Store, args):
 
     session_id = stdin_data.get("session_id", "")
 
-    if event == "UserPromptSubmit":
+    if event in {"UserPromptSubmit", "BeforeAgent"}:
         auto_setup(str(store.project_path), quiet=True)
 
         prompt = stdin_data.get("prompt", "")
@@ -1209,10 +1366,13 @@ def _cmd_hook_handler(store: Store, args):
         if context_msg:
             # Append session continuity context if there was recent activity
             context_msg = _append_session_continuity(context_msg, session_id)
-            hook_output["hookSpecificOutput"] = {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": context_msg,
-            }
+            if event == "UserPromptSubmit":
+                hook_output["hookSpecificOutput"] = {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context_msg,
+                }
+            else:
+                hook_output["hookSpecificOutput"] = {"additionalContext": context_msg}
 
         if hook_output:
             print(json.dumps(hook_output))
@@ -1231,7 +1391,7 @@ def _cmd_hook_handler(store: Store, args):
         state["session_id_prev"] = session_id
         _save_session_state(state)
 
-    elif event == "PostToolUse":
+    elif event in {"PostToolUse", "AfterTool"}:
         tool_name = stdin_data.get("tool_name", "")
         if tool_name not in _SIGNIFICANT_TOOLS:
             return  # Only track significant tool calls
@@ -1300,59 +1460,28 @@ def _cmd_hook_handler(store: Store, args):
 
         _save_session_state(state)
 
-    elif event == "PreToolUse":
+    elif event in {"PreToolUse", "BeforeTool"}:
         # Lightweight: no output, just track timing. We don't block tools.
         pass
 
-    elif event == "Stop":
-        active = store.get_active_task_id()
+    elif event in {"PreCompact", "PreCompress"}:
+        message = _save_compaction_checkpoint(store, stdin_data, event, session_id)
+        if message:
+            print(json.dumps({"systemMessage": message, "suppressOutput": True}))
+
+    elif event == "PostCompact":
         state = _load_session_state()
-
-        if active:
-            from .capture import capture_snapshot
-
-            # Build a rich stop snapshot using session state
-            total = state.get("sig_tool_count", 0) if state.get("session_id") == session_id else 0
-            recent = state.get("recent_tools", []) if total > 0 else []
-
-            if total > 0:
-                last_few = recent[-5:]
-                msg = (
-                    f"Session ended — {total} significant action(s). "
-                    f"Done: {'; '.join(last_few)}"
-                )
-            else:
-                msg = "Agent session ended"
-
-            snap = capture_snapshot(
-                message=msg,
-                source="hook-stop",
-                cwd=str(store.project_path),
-                task_id=active,
-            )
-            rejection = store.add_snapshot(active, snap)
-            if not rejection:
-                store.update_context_file(active)
-                log.saved("Snapshot", msg[:80])
-
-            # Auto-update task.current_state only if it's empty/unset.
-            # This helps the next agent's resume briefing show where things stand.
-            # We only do this when current_state is blank so we don't overwrite
-            # agent-written state (which is always more authoritative).
-            if total > 0:
-                task = store.get_task(active)
-                if task and not task.current_state.strip():
-                    last_actions = "; ".join(recent[-3:])
-                    task.current_state = (
-                        f"[Auto] Last session performed {total} action(s): {last_actions}"
-                    )
-                    store.update_task(task)
-                    store.update_context_file(active)
-
-        # Always record stop time for session continuity detection
-        state["stop_time"] = _now_iso_local()
-        state["stop_session_id"] = session_id
+        state["last_postcompact_time"] = _now_iso_local()
+        state["last_postcompact_task"] = store.get_active_task_id()
         _save_session_state(state)
+
+    elif event in {"Stop", "SessionEnd"}:
+        message = _save_session_end_snapshot(store, event, session_id)
+        if event == "SessionEnd" and message:
+            print(json.dumps({"systemMessage": message, "suppressOutput": True}))
+
+    elif event == "SessionStart":
+        pass
 
 
 def _build_hook_messages(result: dict, full_response: str) -> tuple[str, str]:

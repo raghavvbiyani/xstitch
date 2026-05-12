@@ -61,6 +61,7 @@ class TestToolRegistryCompleteness:
         assert isinstance(gemini, JsonMcpTool)
         assert gemini.inject_mcp(dry_run=True) is not None
         assert gemini.inject_instructions(dry_run=True) is not None
+        assert gemini.inject_hooks(dry_run=True) is not None
 
     def test_copilot_has_mcp_config(self):
         """Copilot CLI should have MCP config path."""

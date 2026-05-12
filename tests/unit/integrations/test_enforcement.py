@@ -14,8 +14,10 @@ class TestEnforcement:
         from xstitch.enforcement import generate_claude_code_hooks
         hooks = generate_claude_code_hooks()
         assert "UserPromptSubmit" in hooks
+        assert "PreCompact" in hooks
         assert "Stop" in hooks
         assert len(hooks["UserPromptSubmit"]) > 0
+        assert len(hooks["PreCompact"]) > 0
         assert len(hooks["Stop"]) > 0
 
     def test_hooks_contain_import_guard(self):

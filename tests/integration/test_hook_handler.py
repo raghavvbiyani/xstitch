@@ -15,18 +15,24 @@ class TestHookHandler:
     def test_hook_handler_parses_event_flag(self):
         """CLI should accept --event flag for hook-handler."""
         import argparse
-        from xstitch.cli import main
 
         parser = argparse.ArgumentParser(prog="xstitch")
         sub = parser.add_subparsers(dest="command")
         hh_p = sub.add_parser("hook-handler")
-        hh_p.add_argument("--event", required=True, choices=["UserPromptSubmit", "Stop"])
+        hh_p.add_argument(
+            "--event",
+            required=True,
+            choices=["UserPromptSubmit", "Stop", "PreCompact", "PreCompress", "BeforeAgent", "AfterTool", "SessionEnd"],
+        )
 
         args = parser.parse_args(["hook-handler", "--event", "UserPromptSubmit"])
         assert args.event == "UserPromptSubmit"
 
         args = parser.parse_args(["hook-handler", "--event", "Stop"])
         assert args.event == "Stop"
+
+        args = parser.parse_args(["hook-handler", "--event", "PreCompact"])
+        assert args.event == "PreCompact"
 
     def test_hook_handler_user_prompt_creates_task(self, tmp_path):
         """UserPromptSubmit hook should run auto-route and create a task."""
@@ -105,6 +111,68 @@ class TestHookHandler:
             snaps = store.get_snapshots(task.id, limit=10)
             assert any("session ended" in s.message.lower() for s in snaps)
 
+    def test_hook_handler_precompact_creates_checkpoint_and_copies_transcript(self, tmp_path):
+        """PreCompact should save a rich recovery checkpoint before compaction."""
+        from xstitch.cli import _cmd_hook_handler
+        from xstitch.store import Store
+
+        fake_global = tmp_path / "global"
+        fake_global.mkdir()
+        transcript = tmp_path / "transcript.jsonl"
+        transcript.write_text('{"role":"user","content":"research logs.txt"}\n')
+
+        with patch("xstitch.store.GLOBAL_HOME", fake_global), \
+             patch("xstitch.store.PROJECTS_HOME", fake_global / "projects"):
+            store = Store(str(tmp_path))
+            store.init_project()
+            task = store.create_task(title="Investigate compaction", objective="test")
+
+            args = MagicMock()
+            args.event = "PreCompact"
+            payload = {
+                "session_id": "s1",
+                "hook_event_name": "PreCompact",
+                "trigger": "auto",
+                "transcript_path": str(transcript),
+            }
+
+            with patch("sys.stdin", io.StringIO(json.dumps(payload))):
+                _cmd_hook_handler(store, args)
+
+            snaps = store.get_snapshots(task.id, limit=10)
+            compact = [s for s in snaps if s.source == "hook-pre-compact"]
+            assert compact
+            assert "PRE-SUMMARIZE CHECKPOINT" in compact[-1].message
+            saved_tail = compact[-1].extra.get("transcript_tail_path")
+            assert saved_tail
+            assert "research logs.txt" in open(saved_tail).read()
+
+    def test_hook_handler_gemini_before_agent_outputs_additional_context(self, tmp_path, capsys):
+        """Gemini BeforeAgent gets Gemini-shaped JSON context output."""
+        from xstitch.cli import _cmd_hook_handler
+        from xstitch.store import Store
+
+        fake_global = tmp_path / "global"
+        fake_global.mkdir()
+
+        with patch("xstitch.store.GLOBAL_HOME", fake_global), \
+             patch("xstitch.store.PROJECTS_HOME", fake_global / "projects"):
+            store = Store(str(tmp_path))
+            store.init_project()
+
+            stdin_json = json.dumps({"prompt": "Build a REST API", "session_id": "g1"})
+            args = MagicMock()
+            args.event = "BeforeAgent"
+
+            with patch("sys.stdin", io.StringIO(stdin_json)), \
+                 patch("xstitch.intelligence.auto_setup"):
+                _cmd_hook_handler(store, args)
+
+            output = json.loads(capsys.readouterr().out)
+            assert "hookSpecificOutput" in output
+            assert "additionalContext" in output["hookSpecificOutput"]
+            assert output["hookSpecificOutput"].get("hookEventName") is None
+
     def test_hook_handler_empty_stdin_no_crash(self, tmp_path):
         """Hook should handle empty stdin gracefully."""
         from xstitch.cli import _cmd_hook_handler
@@ -136,3 +204,7 @@ class TestHookHandler:
         stop_cmd = hooks["Stop"][0]["hooks"][0]["command"]
         assert "hook-handler" in stop_cmd
         assert "--event Stop" in stop_cmd
+
+        precompact_cmd = hooks["PreCompact"][0]["hooks"][0]["command"]
+        assert "hook-handler" in precompact_cmd
+        assert "--event PreCompact" in precompact_cmd

@@ -9,10 +9,10 @@ This guide explains how to add new AI tool integrations to Stitch, either as bui
 Stitch supports 9 built-in tools:
 
 - **Cursor** — JSON MCP at `~/.cursor/mcp.json`
-- **Claude Code** — MCP via `~/.claude.json` or `claude mcp add`
+- **Claude Code** — MCP via `~/.claude.json` or `claude mcp add`, plus lifecycle hooks
 - **Codex** — TOML MCP at `~/.codex/config.toml` + `AGENTS.md`
 - **Windsurf** — JSON MCP at `~/.codeium/windsurf/mcp_config.json`
-- **Gemini CLI** — JSON MCP at `~/.gemini/settings.json` + `GEMINI.md`
+- **Gemini CLI** — JSON MCP at `~/.gemini/settings.json` + `GEMINI.md` + lifecycle hooks
 - **Copilot CLI** — JSON MCP at `~/.copilot/mcp-config.json`
 - **Zed** — JSON MCP at `~/.config/zed/settings.json` (uses `context_servers` key)
 - **Continue.dev** — Standalone JSON at `~/.continue/mcpServers/stitch.json`
@@ -53,6 +53,10 @@ class ToolIntegration:
         """Install Stitch skill files. Default: None (tool doesn't support skills)."""
         return None
 
+    def inject_hooks(self, dry_run: bool = False) -> str | None:
+        """Install lifecycle hooks when the tool supports them. Default: None."""
+        return None
+
     def get_skill_paths(self) -> list[Path]:
         """Paths where this tool looks for skill files. Default: empty."""
         return []
@@ -71,6 +75,7 @@ class ToolIntegration:
 | Class | Use Case |
 |-------|----------|
 | `JsonMcpTool` | Tools with JSON-based MCP config (Cursor, Windsurf, Zed, Gemini CLI, Copilot CLI) |
+| `GeminiCliTool` | Gemini CLI — JSON MCP + `GEMINI.md` + lifecycle hooks |
 | `ClaudeCodeTool` | Claude Code — direct config edit + `claude mcp add` CLI fallback |
 | `CodexTool` | Codex — TOML-based MCP at `~/.codex/config.toml` |
 | `ContinueTool` | Continue.dev — standalone JSON file in `~/.continue/mcpServers/` |

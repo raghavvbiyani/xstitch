@@ -133,6 +133,10 @@ stitch checkpoint \
   -q "Should we add rate limiting now or later?"
 ```
 
+Stitch also writes this style of checkpoint automatically from Claude Code
+`PreCompact` and Gemini CLI `PreCompress` hooks when those tools provide the
+lifecycle event. See [Context Compaction Hooks](context-compaction-hooks.md).
+
 ---
 
 ## Context Retrieval

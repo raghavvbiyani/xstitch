@@ -94,3 +94,32 @@ class TestToolIsolation:
         assert "xstitch" in data["mcpServers"]
         assert "other_server" in data["mcpServers"]
         assert data["mcpServers"]["other_server"]["command"] == "npx"
+
+    def test_gemini_hook_injection_preserves_existing_hooks(self, tmp_path):
+        """Gemini hook injection must add Stitch hooks without deleting user hooks."""
+        from xstitch.global_setup import _inject_gemini_hooks
+
+        cfg = tmp_path / "gemini" / "settings.json"
+        cfg.parent.mkdir(parents=True)
+        cfg.write_text(json.dumps({
+            "hooks": {
+                "PreCompress": [
+                    {
+                        "matcher": "*",
+                        "hooks": [{"name": "user-hook", "type": "command", "command": "echo user"}],
+                    }
+                ]
+            }
+        }))
+
+        result = _inject_gemini_hooks(cfg, dry_run=False)
+        data = json.loads(cfg.read_text())
+
+        assert "Added hooks" in result
+        assert "BeforeAgent" in data["hooks"]
+        assert "AfterTool" in data["hooks"]
+        assert "PreCompress" in data["hooks"]
+        assert "SessionEnd" in data["hooks"]
+        encoded = json.dumps(data["hooks"]["PreCompress"])
+        assert "user-hook" in encoded
+        assert "stitch-pre-compress-checkpoint" in encoded

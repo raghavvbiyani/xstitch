@@ -12,7 +12,8 @@ Integration strategy (layered — strongest mechanism available per tool):
      Zed, Continue.dev, Codex, Gemini CLI, Copilot CLI.
   2. Instruction files — fallback for tools without MCP or as a complement.
      Used for Codex (AGENTS.md), Gemini (GEMINI.md), Aider (CONVENTIONS.md).
-  3. Deterministic hooks — guaranteed execution (Claude Code UserPromptSubmit).
+  3. Deterministic hooks — guaranteed execution where supported
+     (Claude Code UserPromptSubmit/PostToolUse/PreCompact, Gemini hooks).
   4. Universal bootstrap — ~/.ahcp/AGENT_BOOTSTRAP.md for unknown/future tools.
 
 Tools that support MCP get BOTH MCP registration AND instruction files. The MCP
@@ -126,6 +127,10 @@ class ToolIntegration:
         """
         return None
 
+    def inject_hooks(self, dry_run: bool = False) -> str | None:
+        """Install lifecycle hooks for tools that expose a hook system."""
+        return None
+
     def get_skill_paths(self) -> list[Path]:
         """Return paths where this tool looks for skill files.
         Default: empty (tool doesn't support skills).
@@ -183,6 +188,7 @@ Use this skill at the start of every session and when pushing context updates.
 - After sub-tasks: `python3 -m xstitch.cli snap -m "what was done"`
 - After decisions: `python3 -m xstitch.cli decide -p "problem" -c "chosen" -a "alts" -r "why"`
 - Every 2-3 minutes: `python3 -m xstitch.cli snap -m "progress"`
+- Before context-heavy research or likely compaction: `python3 -m xstitch.cli checkpoint -s "summary" -d "decisions" -e "experiments" -f "failures" -q "questions"`
 - Before ending: `python3 -m xstitch.cli checkpoint -s "summary" -d "decisions" -e "experiments" -f "failures" -q "questions"`
 - If the work produced durable project knowledge, run `python3 -m xstitch.cli wiki init`
   and update/log the wiki instead of leaving the knowledge only in chat.
@@ -246,6 +252,13 @@ class JsonMcpTool(_PathDetectMixin, _InstructionsMixin, _SkillsMixin, ToolIntegr
         if self._instructions_file:
             d["instructions_file"] = self._instructions_file
         return d
+
+
+class GeminiCliTool(JsonMcpTool):
+    """Gemini CLI — MCP + instructions + hook lifecycle integration."""
+
+    def inject_hooks(self, dry_run: bool = False) -> str | None:
+        return _inject_gemini_hooks(self._config_path, dry_run)
 
 
 class ClaudeCodeTool(_PathDetectMixin, ToolIntegration):
@@ -329,10 +342,10 @@ ALL_TOOLS: list[ToolIntegration] = [
     ContinueTool(),
     ClaudeCodeTool(),
     CodexTool(),
-    JsonMcpTool("Gemini CLI", detect_paths=[Path.home() / ".gemini"],
-                config_path=Path.home() / ".gemini" / "settings.json",
-                instructions_file=Path.home() / ".gemini" / "GEMINI.md",
-                extra_fields={"env": _agent_env("gemini-cli")}),
+    GeminiCliTool("Gemini CLI", detect_paths=[Path.home() / ".gemini"],
+                  config_path=Path.home() / ".gemini" / "settings.json",
+                  instructions_file=Path.home() / ".gemini" / "GEMINI.md",
+                  extra_fields={"env": _agent_env("gemini-cli")}),
     JsonMcpTool("Copilot CLI", detect_paths=[Path.home() / ".copilot"],
                 detect_cmd="copilot",
                 config_path=Path.home() / ".copilot" / "mcp-config.json",
@@ -371,6 +384,7 @@ Push **immediately** when any of these happen:
 4. **Hit a blocker**: `python3 -m xstitch.cli task update --blockers "description" --state "current state"`
 5. **Every 2-3 minutes** of active work: `python3 -m xstitch.cli snap -m "progress summary"`
 6. **Reusable project knowledge created**: update the LLM wiki (`wiki init`, `wiki log`).
+7. **Before context-heavy research / likely compaction**: run `checkpoint` so work survives tools without pre-compact hooks.
 
 ### Quality Rules
 - Every snapshot must answer: **What** was done + **What** was the result.
@@ -456,6 +470,11 @@ def inject_mcp_for_tool(tool: ToolIntegration, dry_run: bool = False) -> str | N
 def inject_instructions_for_tool(tool: ToolIntegration, dry_run: bool = False) -> str | None:
     """Inject Stitch session protocol for a detected tool."""
     return tool.inject_instructions(dry_run)
+
+
+def inject_hooks_for_tool(tool: ToolIntegration, dry_run: bool = False) -> str | None:
+    """Inject lifecycle hooks for tools that support them."""
+    return tool.inject_hooks(dry_run)
 
 
 def generate_bootstrap(configured_tools: list[str]) -> Path:
@@ -628,6 +647,7 @@ def global_setup(dry_run: bool = False):
     configured = []
     mcp_results = []
     instr_results = []
+    hook_results = []
 
     for tool in tools:
         mcp_result = inject_mcp_for_tool(tool, dry_run=dry_run)
@@ -637,6 +657,10 @@ def global_setup(dry_run: bool = False):
         instr_result = inject_instructions_for_tool(tool, dry_run=dry_run)
         if instr_result:
             instr_results.append((tool.name, instr_result))
+
+        hook_result = inject_hooks_for_tool(tool, dry_run=dry_run)
+        if hook_result:
+            hook_results.append((tool.name, hook_result))
 
         configured.append(tool.name)
 
@@ -650,6 +674,12 @@ def global_setup(dry_run: bool = False):
     if instr_results:
         print("Global Instructions Injection:")
         for name, result in instr_results:
+            print(f"  [{name}] {result}")
+        print()
+
+    if hook_results:
+        print("Lifecycle Hooks:")
+        for name, result in hook_results:
             print(f"  [{name}] {result}")
         print()
 
@@ -734,6 +764,101 @@ def _inject_json_mcp(
     servers["xstitch"] = entry
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     return f"Added to {config_path}"
+
+
+def _hook_command(event: str) -> str:
+    return (
+        'python3 -c "import xstitch" 2>/dev/null && '
+        f"python3 -m xstitch.cli hook-handler --event {event}; true"
+    )
+
+
+def _inject_gemini_hooks(config_path: Path, dry_run: bool) -> str:
+    """Install Gemini CLI hooks for prompt routing, tool snapshots, and PreCompress."""
+    if dry_run:
+        return f"Would add hooks to {config_path}"
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config = {}
+    if config_path.exists():
+        try:
+            raw = config_path.read_text().strip()
+            if raw:
+                config = json.loads(raw)
+        except (json.JSONDecodeError, OSError) as e:
+            return f"Skipped hooks — config unreadable: {e}"
+
+    hooks = config.setdefault("hooks", {})
+    stitch_hooks = {
+        "BeforeAgent": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "name": "stitch-route-context",
+                        "type": "command",
+                        "command": _hook_command("BeforeAgent"),
+                        "description": "Route the user prompt through Stitch and inject saved context.",
+                    }
+                ],
+            }
+        ],
+        "AfterTool": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "name": "stitch-auto-snapshot",
+                        "type": "command",
+                        "command": _hook_command("AfterTool"),
+                        "description": "Record tool activity for Stitch session recovery.",
+                    }
+                ],
+            }
+        ],
+        "PreCompress": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "name": "stitch-pre-compress-checkpoint",
+                        "type": "command",
+                        "command": _hook_command("PreCompress"),
+                        "description": "Save Stitch checkpoint before Gemini compresses context.",
+                    }
+                ],
+            }
+        ],
+        "SessionEnd": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "name": "stitch-session-end",
+                        "type": "command",
+                        "command": _hook_command("SessionEnd"),
+                        "description": "Save Stitch session-end snapshot.",
+                    }
+                ],
+            }
+        ],
+    }
+
+    changed = False
+    for event, event_hooks in stitch_hooks.items():
+        existing = hooks.get(event, [])
+        non_stitch = [h for h in existing if "xstitch" not in json.dumps(h) and "stitch" not in json.dumps(h)]
+        merged = non_stitch + event_hooks
+        if existing != merged:
+            hooks[event] = merged
+            changed = True
+
+    if not changed:
+        return f"Hooks already registered in {config_path}"
+
+    config.setdefault("hooksConfig", {}).setdefault("enabled", True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+    return f"Added hooks to {config_path}"
 
 
 def _inject_claude_code_mcp(dry_run: bool) -> str:

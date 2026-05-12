@@ -94,9 +94,9 @@ stitch auto-setup
 | Tool | Integration Method |
 |------|-------------------|
 | **Cursor** | MCP server + `.cursor/rules/` enforcement |
-| **Claude Code** | MCP server + deterministic hooks |
+| **Claude Code** | MCP server + deterministic hooks, including `PreCompact` |
 | **Codex** | MCP server (NDJSON) + `AGENTS.md` |
-| **Gemini CLI** | MCP server + `GEMINI.md` |
+| **Gemini CLI** | MCP server + `GEMINI.md` + lifecycle hooks, including `PreCompress` |
 | **Windsurf** | MCP server |
 | **Copilot CLI** | MCP server |
 | **Zed** | MCP server |
@@ -116,6 +116,7 @@ Don't see your tool? Stitch generates `~/.ahcp/AGENT_BOOTSTRAP.md` — a univers
 | **BM25 relevance search** | Say "resume the auth refactor" — Stitch finds it even if those words don't appear in the title. Includes trigram fuzzy matching for typo tolerance. |
 | **Safe context routing** | Stitch only auto-loads context when the match is decisive. If saved context looks plausible but ambiguous, it asks the user to choose a task or start fresh. |
 | **Resume briefings** | New agents get structured context: decisions with reasoning, failed experiments with warnings, exact next steps, and live repo state. |
+| **Pre-compaction recovery** | Claude Code `PreCompact` and Gemini CLI `PreCompress` hooks save a checkpoint and transcript tail before summarization when those tools expose lifecycle hooks. See [`docs/context-compaction-hooks.md`](docs/context-compaction-hooks.md). |
 | **Cross-agent sync** | Cursor and Claude Code see the same tasks regardless of which cwd spawned the MCP. An append-only event log (`stitch_what_changed`) lets any agent discover what the others have done since it last checked. See [`docs/cross-agent-sync.md`](docs/cross-agent-sync.md). |
 | **Initial prompt capture** | Newly created tasks store the full first user request as an `initial_user_prompt` snapshot so future agents see the exact original ask. |
 | **LLM wiki** | `stitch wiki init` creates a markdown wiki for durable project knowledge that should survive many tasks. |

@@ -3,7 +3,8 @@
 Generates hooks and configuration for tools that support infrastructure-level
 enforcement (not just soft instructions). Currently supports:
 
-1. Claude Code hooks (.claude/settings.json) — deterministic shell commands
+1. Claude Code hooks (.claude/settings.json) — deterministic shell commands,
+   including PreCompact so context is persisted before auto-compaction
 2. Cursor .mdc rules with alwaysApply: true — reliably loaded every session
 
 These mechanisms cannot be bypassed by the LLM choosing to skip instructions.
@@ -23,6 +24,7 @@ def generate_claude_code_hooks() -> dict:
     - Reads the user's prompt from stdin JSON (provided by Claude Code)
     - Runs auto-setup + auto-route deterministically
     - Outputs context to stdout (Claude Code injects this into the conversation)
+    - Saves pre-compact checkpoints before `/compact` or auto-compact runs
 
     Guard: `python3 -c 'import xstitch'` makes hooks no-ops on machines without Stitch.
     Suffix: `; true` ensures hooks never block the agent even if Stitch errors.
@@ -49,6 +51,45 @@ def generate_claude_code_hooks() -> dict:
                         "command": (
                             'python3 -c "import xstitch" 2>/dev/null && '
                             "python3 -m xstitch.cli hook-handler --event PostToolUse; true"
+                        ),
+                    }
+                ]
+            }
+        ],
+        "PreCompact": [
+            {
+                "matcher": "auto",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": (
+                            'python3 -c "import xstitch" 2>/dev/null && '
+                            "python3 -m xstitch.cli hook-handler --event PreCompact; true"
+                        ),
+                    }
+                ],
+            },
+            {
+                "matcher": "manual",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": (
+                            'python3 -c "import xstitch" 2>/dev/null && '
+                            "python3 -m xstitch.cli hook-handler --event PreCompact; true"
+                        ),
+                    }
+                ],
+            },
+        ],
+        "PostCompact": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": (
+                            'python3 -c "import xstitch" 2>/dev/null && '
+                            "python3 -m xstitch.cli hook-handler --event PostCompact; true"
                         ),
                     }
                 ]
@@ -149,7 +190,7 @@ def check_claude_code_hooks() -> dict:
             try:
                 config = json.loads(path.read_text())
                 hooks = config.get("hooks", {})
-                if any("xstitch" in json.dumps(hooks.get(e, [])) for e in ["UserPromptSubmit", "PostToolUse", "Stop"]):
+                if any("xstitch" in json.dumps(hooks.get(e, [])) for e in ["UserPromptSubmit", "PostToolUse", "PreCompact", "Stop"]):
                     return {"status": "ok", "detail": f"Hooks found in {label} settings ({path})"}
             except (json.JSONDecodeError, OSError):
                 continue
